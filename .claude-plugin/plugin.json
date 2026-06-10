@@ -1,7 +1,7 @@
 {
   "name": "vault",
   "displayName": "Vault",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Remote document & context store for Claude — MCP tools, multi-vault manager, and automatic session sync.",
   "author": {
     "name": "l1mzh0317"

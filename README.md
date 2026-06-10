@@ -56,17 +56,28 @@ The **desktop app cannot install plugins from a custom marketplace** — the
 `/plugin marketplace add` step is CLI-only and the desktop skill loader is broken
 for custom-marketplace plugins ([anthropics/claude-code#39897](https://github.com/anthropics/claude-code/issues/39897),
 closed as not-planned). So on desktop, **don't install the plugin** — wire up the
-same three capabilities directly, via mechanisms the desktop app *does* support:
+same three capabilities directly, via mechanisms the desktop app *does* support.
+
+**No clone needed** — one line (downloads the skill + hook files itself):
 
 ```
-git clone https://github.com/l1mzh0317/vault-plugin
-cd vault-plugin
-./desktop-setup.sh https://your-vault.example.com <your-token>
-# or, if you already registered a vault with vault-manager, just:
-./desktop-setup.sh
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/desktop-setup.sh \
+  | bash -s -- https://your-vault.example.com <your-token>
 ```
 
-This installs, with **no plugin system involved**:
+(Already registered a vault with `vault-manager`? Drop the url/token — it reads
+the registry. Prefer a clone? `git clone … && ./desktop-setup.sh`.)
+
+**Just want the tools, nothing else?** The MCP server needs **no files at all** —
+one command, no clone, no script:
+
+```
+claude mcp add vault --scope user --transport http \
+  https://your-vault.example.com/mcp \
+  --header "Authorization: Bearer <your-token>"
+```
+
+The full `desktop-setup.sh` installs, with **no plugin system involved**:
 
 | Capability | Installed as | Works on desktop because |
 |---|---|---|

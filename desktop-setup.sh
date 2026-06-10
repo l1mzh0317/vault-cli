@@ -12,12 +12,18 @@
 #   2. Skills            -> ~/.claude/skills/ (personal skills load on desktop)
 #   3. Session-sync hook -> "hooks" block in ~/.claude/settings.json (local)
 #
-# Usage:
+# Usage (no clone needed — runs straight from a pipe):
+#   curl -fsSL <raw>/desktop-setup.sh | bash -s -- <base-url> <token>
+# or from a local clone:
 #   ./desktop-setup.sh                  # url+token from ~/.vault/servers.json
 #   ./desktop-setup.sh <base-url> <token>   # explicit; url WITHOUT /mcp
 #   ./desktop-setup.sh --uninstall      # remove everything this installed
 #
-# Requires: python3 (the sync engine needs it too). Restart Claude Code after.
+# When run without a local repo (e.g. via curl|bash) the skill + hook files
+# are downloaded from GitHub automatically; the MCP step needs no files at all.
+#
+# Requires: python3 (the sync engine needs it too); curl when not from a clone.
+# Restart Claude Code after.
 set -uo pipefail
 # Prefer system python over Anaconda (whose libs have broken TLS), keep $PATH.
 export PATH="/usr/bin:/bin:$PATH"
@@ -112,6 +118,23 @@ tmp = p + ".tmp"; json.dump(d, open(tmp, "w", encoding="utf-8"),
 print("  ✓ MCP server 'vault' →", url)
 PY
 
+# ── ensure skill + hook files are present locally (clone OR download) ────────
+TMP_WORK=""
+if [ ! -f "$HOOKS_SRC/session-log.sh" ]; then
+  command -v curl >/dev/null 2>&1 || { echo "✗ curl needed to download files (or clone the repo and re-run)"; exit 1; }
+  echo "  (no local repo — downloading skill + hook files from GitHub…)"
+  RAW="https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main"
+  TMP_WORK="$(mktemp -d)"
+  for rel in hooks/session-log.sh hooks/vault_sync.py \
+             skills/vault-mcp/SKILL.md \
+             skills/vault-manager/SKILL.md skills/vault-manager/vault-manager; do
+    mkdir -p "$TMP_WORK/$(dirname "$rel")"
+    curl -fsSL "$RAW/$rel" -o "$TMP_WORK/$rel" \
+      || { echo "✗ download failed: $rel"; rm -rf "$TMP_WORK"; exit 1; }
+  done
+  HOOKS_SRC="$TMP_WORK/hooks"; SKILLS_SRC="$TMP_WORK/skills"
+fi
+
 # ── 2. skills (personal skills load on desktop) ──────────────────────────────
 mkdir -p "$SKILLS_DST"
 for sk in "${SKILLS[@]}"; do
@@ -151,6 +174,8 @@ tmp = settings + ".tmp"; json.dump(s, open(tmp, "w", encoding="utf-8"),
 os.replace(tmp, settings)
 print("  ✓ hooks → SessionStart + Stop in settings.json")
 PY
+
+[ -n "$TMP_WORK" ] && rm -rf "$TMP_WORK"
 
 echo ""
 echo "Done. Restart Claude Code (desktop or CLI) to load everything."
