@@ -18,6 +18,10 @@ Config (env overrides registry overrides legacy default):
   default URL               https://longku-vault.zeabur.app
   CLAUDE_PROJECTS_DIR       default ~/.claude/projects
 Flag file ~/.vault-logging-on must exist or scan/once are no-ops.
+Flag file ~/.vault-session-meta-on (optional): when present, every synced
+  transcript is ALSO registered as a Vault session entity via sync_session
+  (so it shows up in list_sessions). Content is read locally by this engine
+  and pushed straight to the vault, so it never enters Claude's context.
 """
 import json
 import os
@@ -28,6 +32,7 @@ import urllib.request
 
 HOME = os.path.expanduser("~")
 FLAG = os.path.join(HOME, ".vault-logging-on")
+META_FLAG = os.path.join(HOME, ".vault-session-meta-on")
 TOKEN_FILE = os.path.join(HOME, ".vault-token")
 STATE_FILE = os.path.join(HOME, ".vault-sync-state.json")
 LOG_FILE = os.path.join(HOME, ".vault-sync.log")
@@ -144,6 +149,36 @@ def vault_rebuild(path, token, timeout=20):
         return r.status
 
 
+def vault_sync_session(args, token, timeout=30):
+    """Register a session ENTITY (metadata + content) via the sync_session MCP
+    tool, so it appears in list_sessions. Content is sent straight from here —
+    it never round-trips through Claude's context. Raises on a vault error."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "sync_session", "arguments": args}}
+    req = urllib.request.Request(
+        VAULT_URL + "/mcp", data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Authorization": "Bearer " + token,
+                 "Content-Type": "application/json",
+                 "Accept": "application/json, text/event-stream"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read().decode("utf-8", "replace")
+    # The server may answer with plain JSON or SSE 'data: {...}' framing.
+    try:
+        data = json.loads(raw)
+    except Exception:
+        chunk = ""
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                chunk = line[5:].strip()
+        data = json.loads(chunk) if chunk else {}
+    if data.get("error"):
+        raise RuntimeError(str(data["error"])[:200])
+    if (data.get("result") or {}).get("isError"):
+        raise RuntimeError(str(data["result"])[:200])
+    return True
+
+
 # ── transcript parsing ───────────────────────────────────────────────────────
 def extract_body(jsonl_path):
     lines = []
@@ -193,6 +228,47 @@ def doc_name_for(jsonl_path):
     return f"sessions/{proj}/{session_id[:8]}"
 
 
+def first_user_text(jsonl_path, cap=60):
+    """First real user message, for use as a session label. Skips command /
+    system-reminder noise (those start with '<')."""
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    d = json.loads(raw)
+                except Exception:
+                    continue
+                if d.get("type") != "user":
+                    continue
+                content = d.get("message", {}).get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        c.get("text", "") if isinstance(c, dict) else str(c)
+                        for c in content)
+                s = content.strip() if isinstance(content, str) else ""
+                if s and not s.startswith("<"):
+                    return s.splitlines()[0][:cap]
+    except Exception:
+        pass
+    return ""
+
+
+def session_meta_for(jsonl_path, body):
+    """Build sync_session arguments for a transcript. session_id uses the same
+    8-char id as the source doc path, so sync_session writes to the SAME doc
+    (no duplicate) and just adds the metadata record."""
+    sid = os.path.basename(jsonl_path)[:-6][:8]
+    proj = pretty_project(os.path.basename(os.path.dirname(jsonl_path)))
+    try:
+        date = time.strftime("%Y-%m-%d",
+                             time.localtime(os.stat(jsonl_path).st_mtime))
+    except OSError:
+        date = time.strftime("%Y-%m-%d")
+    return {"content": body, "project": proj, "session_id": sid,
+            "date": date, "tags": ["auto"],
+            "label": first_user_text(jsonl_path)}
+
+
 def cwd_project():
     """Project segment for the current working directory (no jsonl needed)."""
     return pretty_project(os.getcwd().replace("/", "-"))
@@ -213,6 +289,8 @@ def iter_transcripts():
 def do_scan(token, force=False):
     state = {} if force else load_state()
     synced = skipped = empty = failed = 0
+    meta_on = os.path.exists(META_FLAG)
+    meta_ok = meta_fail = 0
 
     for jsonl in iter_transcripts():
         try:
@@ -238,13 +316,25 @@ def do_scan(token, force=False):
             state[key] = {"last_modified": int(st.st_mtime),
                           "doc": doc_name_for(jsonl), "bytes": len(body)}
             synced += 1
+            if meta_on:
+                try:
+                    vault_sync_session(session_meta_for(jsonl, body), token)
+                    meta_ok += 1
+                except Exception as e:
+                    meta_fail += 1
+                    log(f"sync_session meta failed for "
+                        f"{os.path.basename(jsonl)}: {e}")
         except Exception as e:
             failed += 1
             log(f"PUT failed for {os.path.basename(jsonl)}: {e}")
 
     save_state(state)
-    return {"synced": synced, "skipped": skipped, "empty": empty,
-            "failed": failed}
+    res = {"synced": synced, "skipped": skipped, "empty": empty,
+           "failed": failed}
+    if meta_on:
+        res["meta_synced"] = meta_ok
+        res["meta_failed"] = meta_fail
+    return res
 
 
 # ── rebuild (re-summarize refined face on demand) ────────────────────────────
@@ -347,6 +437,8 @@ def doctor():
     print("龙库 · 会话同步体检")
     print("─" * 40)
     print(f"  日志开关 (~/.vault-logging-on) : {ok if os.path.exists(FLAG) else no + ' 未开启 (touch 它)'}")
+    meta = os.path.exists(META_FLAG)
+    print(f"  session 元数据开关 (…meta-on) : {ok + ' 开 (同步即建 list_sessions 记录)' if meta else '— 关 (仅同步 source；touch 开启)'}")
     print(f"  Vault token                   : {ok if token else no + ' 缺失'}")
     print(f"  transcript 目录               : {ok if os.path.isdir(PROJECTS_DIR) else no} {PROJECTS_DIR}")
     print(f"  Vault 可达 ({VAULT_URL})")

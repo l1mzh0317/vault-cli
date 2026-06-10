@@ -13,6 +13,12 @@
 #
 # Enable logging:  touch ~/.vault-logging-on
 # Disable:         rm ~/.vault-logging-on
+#
+# Optional — also register synced transcripts as session entities
+# (sync_session → list_sessions); content is read locally so it never enters
+# Claude's context:
+#   Enable:   touch ~/.vault-session-meta-on
+#   Disable:  rm ~/.vault-session-meta-on
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
