@@ -2,7 +2,7 @@
   "mcpServers": {
     "vault": {
       "type": "http",
-      "url": "${user_config.vault_url}",
+      "url": "${user_config.vault_url}/mcp",
       "headers": {
         "Authorization": "Bearer ${user_config.vault_token}"
       }

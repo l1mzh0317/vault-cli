@@ -1,7 +1,7 @@
 {
   "name": "vault",
   "displayName": "Vault",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Remote document & context store for Claude — MCP tools, multi-vault manager, and automatic session sync.",
   "author": { "name": "l1mzh0317" },
   "homepage": "https://github.com/l1mzh0317/vault-plugin",
@@ -12,8 +12,8 @@
     "vault_url": {
       "type": "string",
       "title": "Vault URL",
-      "description": "Your vault server's MCP endpoint (include the /mcp suffix).",
-      "default": "https://longku-vault.zeabur.app/mcp"
+      "description": "Your vault server's base URL, WITHOUT the /mcp suffix (the plugin appends it). E.g. https://longku-vault.zeabur.app",
+      "default": "https://longku-vault.zeabur.app"
     },
     "vault_token": {
       "type": "string",

@@ -7,7 +7,7 @@
       "name": "vault",
       "source": "./",
       "description": "Remote document & context store for Claude — MCP tools, multi-vault manager, and automatic session sync.",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "license": "MIT"
     }
   ]
