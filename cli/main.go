@@ -42,8 +42,10 @@ import (
 	"time"
 )
 
+// version is overridden at build time via -ldflags "-X main.version=…".
+var version = "0.1.0-dev"
+
 const (
-	version    = "0.1.0"
 	maxBody    = 100_000 // chars; matches python MAX_BODY
 	defaultURL = "https://longku-vault.zeabur.app"
 )

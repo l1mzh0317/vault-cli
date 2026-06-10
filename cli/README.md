@@ -19,7 +19,17 @@ static binary any agent/harness can call over a shell (CC, Codex, desktop, cron)
 
 > Rule of thumb: **MCP for reads/queries, this CLI for writes/bulk.**
 
-## Build
+## Install (no Go needed)
+
+```
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
+```
+
+Downloads the right static binary from the latest release into `~/.local/bin`
+(override with `INSTALL_DIR=…`). Windows: grab `vault-windows-amd64.exe` from the
+[Releases](https://github.com/l1mzh0317/vault-plugin/releases) page.
+
+## Build from source
 
 ```
 cd cli

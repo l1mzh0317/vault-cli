@@ -1,0 +1,55 @@
+name: cli-release
+
+# Cut a release by pushing a tag like `cli-v0.1.0`:
+#   git tag cli-v0.1.0 && git push origin cli-v0.1.0
+# This cross-compiles the `vault` CLI for every platform and attaches the
+# static binaries to a GitHub Release.
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions:
+  contents: write   # required to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+
+      - name: Cross-compile static binaries
+        working-directory: cli
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#cli-v}"
+          mkdir -p dist
+          for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do
+            os="${t%/*}"; arch="${t#*/}"
+            out="dist/vault-${os}-${arch}"
+            [ "$os" = windows ] && out="${out}.exe"
+            echo "building $out"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -ldflags="-s -w -X main.version=${VERSION}" -o "$out" .
+          done
+          ls -lh dist
+
+      - name: Publish release
+        working-directory: cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "vault CLI ${GITHUB_REF_NAME#cli-v}" \
+            --notes "Static \`vault\` CLI binaries (no runtime needed).
+
+          Install:
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/cli/install.sh | sh
+          \`\`\`
+          or grab the binary for your platform below. See \`cli/README.md\`."
