@@ -26,7 +26,10 @@ curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/ins
 ```
 
 Downloads the right static binary from the latest release into `~/.local/bin`
-(override with `INSTALL_DIR=…`). Windows: grab `vault-windows-amd64.exe` from the
+(override with `INSTALL_DIR=…`) **and** installs a markdown `vault` skill to
+`~/.claude/skills/vault/` so Claude knows the CLI exists (set `NO_SKILL=1` to
+skip; restart Claude Code to load `/vault`). Windows: grab
+`vault-windows-amd64.exe` from the
 [Releases](https://github.com/l1mzh0317/vault-plugin/releases) page.
 
 ## Build from source

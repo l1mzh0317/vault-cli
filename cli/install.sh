@@ -46,4 +46,20 @@ case ":$PATH:" in
   *":$DIR:"*) ;;
   *) echo "  note: ${DIR} is not on your PATH — add it to use \`vault\` directly" ;;
 esac
+
+# install the `vault` skill (markdown only) so Claude knows the CLI exists.
+# Set NO_SKILL=1 to skip.
+if [ "${NO_SKILL:-}" != "1" ]; then
+  skill_dir="$HOME/.claude/skills/vault"
+  mkdir -p "$skill_dir"
+  if curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/cli/skill/SKILL.md" \
+       -o "$skill_dir/SKILL.md.tmp"; then
+    mv "$skill_dir/SKILL.md.tmp" "$skill_dir/SKILL.md"
+    echo "✓ skill → ${skill_dir}/SKILL.md  (restart Claude Code to load /vault)"
+  else
+    rm -f "$skill_dir/SKILL.md.tmp"
+    echo "  (skill download skipped — binary still works)"
+  fi
+fi
+
 "$DIR/vault" version || true
