@@ -78,6 +78,7 @@ vault build-status <name>             check build progress
 
 # local / meta
 vault sync [--resync] [--meta]        scan transcripts → vault
+vault setup [--uninstall]             wire Claude Code: MCP server + auto-sync hooks
 vault config                          show resolved config + registered vaults
 vault config use <name>               switch active vault
 vault config add <name> <url> <token> register a vault

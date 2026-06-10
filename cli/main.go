@@ -884,6 +884,139 @@ func cmdConfigAdd(name, urlArg, tok string) {
 	fmt.Printf("✓ added %s → %s%s\n", name, u, star)
 }
 
+// ── Claude Code integration (setup) ──────────────────────────────────────────
+// All JSON edits happen here in Go, so the desktop install needs no python.
+const hookMarker = "vault sync" // identifies hooks this CLI installed
+
+func loadJSONFile(path string) map[string]any {
+	m := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	return m
+}
+
+func saveJSONFile(path string, m map[string]any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(m, "", "  ")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// isVaultHook reports whether a hook block was installed by us (vault CLI) or by
+// the legacy python session-log hook — either way, ours to manage.
+func isVaultHook(b any) bool {
+	bm, ok := b.(map[string]any)
+	if !ok {
+		return false
+	}
+	hs, _ := bm["hooks"].([]any)
+	for _, h := range hs {
+		if hm, ok := h.(map[string]any); ok {
+			c, _ := hm["command"].(string)
+			if strings.Contains(c, hookMarker) || strings.Contains(c, "session-log.sh") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func dropVaultHooks(hooks map[string]any, event string) bool {
+	arr, _ := hooks[event].([]any)
+	out := make([]any, 0, len(arr))
+	for _, b := range arr {
+		if !isVaultHook(b) {
+			out = append(out, b)
+		}
+	}
+	hooks[event] = out
+	return len(out) != len(arr)
+}
+
+func setHook(hooks map[string]any, event, cmd string) {
+	dropVaultHooks(hooks, event) // replace any prior vault/legacy entry
+	arr, _ := hooks[event].([]any)
+	arr = append(arr, map[string]any{"matcher": "*",
+		"hooks": []any{map[string]any{"type": "command", "command": cmd}}})
+	hooks[event] = arr
+}
+
+func quoteCmd(p string) string {
+	if strings.ContainsAny(p, " \t") {
+		return `"` + p + `"`
+	}
+	return p
+}
+
+func cmdSetup(uninstall, noHook, noMCP bool) {
+	cj := filepath.Join(home(), ".claude.json")
+	settings := filepath.Join(home(), ".claude", "settings.json")
+
+	if uninstall {
+		d := loadJSONFile(cj)
+		if ms, ok := d["mcpServers"].(map[string]any); ok {
+			delete(ms, "vault")
+			_ = saveJSONFile(cj, d)
+		}
+		s := loadJSONFile(settings)
+		if hooks, ok := s["hooks"].(map[string]any); ok {
+			dropVaultHooks(hooks, "SessionStart")
+			dropVaultHooks(hooks, "Stop")
+			_ = saveJSONFile(settings, s)
+		}
+		fmt.Println("✓ removed vault MCP server + sync hooks (binary + registry kept)")
+		return
+	}
+
+	if token() == "" {
+		die(errors.New("no vault token — run `vault config add <name> <url> <token>` first"))
+	}
+	self, err := os.Executable()
+	if err != nil {
+		self = "vault"
+	}
+
+	if !noMCP {
+		d := loadJSONFile(cj)
+		ms, _ := d["mcpServers"].(map[string]any)
+		if ms == nil {
+			ms = map[string]any{}
+		}
+		ms["vault"] = map[string]any{"type": "http", "url": baseURL() + "/mcp",
+			"headers": map[string]any{"Authorization": "Bearer " + token()}}
+		d["mcpServers"] = ms
+		if err := saveJSONFile(cj, d); err != nil {
+			die(err)
+		}
+		fmt.Printf("  ✓ MCP server 'vault' → %s\n", cj)
+	}
+	if !noHook {
+		s := loadJSONFile(settings)
+		hooks, _ := s["hooks"].(map[string]any)
+		if hooks == nil {
+			hooks = map[string]any{}
+		}
+		cmd := quoteCmd(self) + " sync"
+		setHook(hooks, "SessionStart", cmd)
+		setHook(hooks, "Stop", cmd)
+		s["hooks"] = hooks
+		if err := saveJSONFile(settings, s); err != nil {
+			die(err)
+		}
+		fmt.Printf("  ✓ sync hooks (SessionStart+Stop → %s) → %s\n", cmd, settings)
+	}
+	fmt.Println("Restart Claude Code to apply.")
+}
+
 // parseArgs parses a flagset while tolerating flags placed AFTER positionals
 // (Go's flag pkg stops at the first positional). Returns the positional args.
 func parseArgs(fs *flag.FlagSet, args []string) []string {
@@ -935,6 +1068,7 @@ context sets
 
 local / meta
   vault sync [--resync] [--meta]        scan transcripts → vault
+  vault setup [--uninstall] [--no-hook] [--no-mcp]   wire Claude Code (MCP + auto-sync hooks)
   vault config                          show resolved config + registered vaults
   vault config use <name>               switch active vault
   vault config add <name> <url> <token> register a vault
@@ -1103,6 +1237,14 @@ func main() {
 		default:
 			die(errors.New("usage: vault config [use <name> | add <name> <url> <token>]"))
 		}
+
+	case "setup":
+		fs := flag.NewFlagSet("setup", flag.ExitOnError)
+		un := fs.Bool("uninstall", false, "remove the MCP server + sync hooks")
+		noHook := fs.Bool("no-hook", false, "skip the auto-sync hooks")
+		noMCP := fs.Bool("no-mcp", false, "skip the MCP server")
+		parseArgs(fs, rest)
+		cmdSetup(*un, *noHook, *noMCP)
 
 	case "doctor":
 		cmdDoctor()

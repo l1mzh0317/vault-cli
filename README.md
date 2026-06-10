@@ -55,39 +55,37 @@ vault-manager add myvault https://your-vault.example.com <your-token>
 The **desktop app cannot install plugins from a custom marketplace** — the
 `/plugin marketplace add` step is CLI-only and the desktop skill loader is broken
 for custom-marketplace plugins ([anthropics/claude-code#39897](https://github.com/anthropics/claude-code/issues/39897),
-closed as not-planned). So on desktop, **don't install the plugin** — wire up the
-same three capabilities directly, via mechanisms the desktop app *does* support.
-
-**No clone needed** — one line (downloads the skill + hook files itself):
+closed as not-planned). So on desktop, **don't install the plugin** — use the
+`vault` CLI instead. One static binary, **no python, no plugin system**:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/desktop-setup.sh \
-  | bash -s -- https://your-vault.example.com <your-token>
+  | sh -s -- https://your-vault.example.com <your-token>
 ```
 
-(Already registered a vault with `vault-manager`? Drop the url/token — it reads
-the registry. Prefer a clone? `git clone … && ./desktop-setup.sh`.)
+This installs the binary, registers your vault, and wires Claude Code — then
+**restart**. It does, entirely in Go + sh:
 
-**Just want the tools, nothing else?** The MCP server needs **no files at all** —
-one command, no clone, no script:
-
-```
-claude mcp add vault --scope user --transport http \
-  https://your-vault.example.com/mcp \
-  --header "Authorization: Bearer <your-token>"
-```
-
-The full `desktop-setup.sh` installs, with **no plugin system involved**:
-
-| Capability | Installed as | Works on desktop because |
+| Step | What | Works on desktop because |
 |---|---|---|
-| Vault **MCP tools** | user-scope `mcpServers` in `~/.claude.json` | desktop natively supports remote HTTP MCP |
-| **Skills** (`/vault-mcp`, `/vault-manager`) | personal skills in `~/.claude/skills/` | personal skills load on every surface |
-| **Session-sync hook** | `hooks` block in `~/.claude/settings.json` | desktop runs local shell hooks |
+| install binary | `vault` → `~/.local/bin` | single static binary, no runtime |
+| MCP server | user-scope `mcpServers` in `~/.claude.json` | desktop natively supports remote HTTP MCP |
+| auto-sync hooks | `hooks` in `~/.claude/settings.json` → `vault sync` | desktop runs local shell hooks |
 
-Then **restart Claude Code**. Requires `python3` (the sync engine needs it too).
-Undo anytime with `./desktop-setup.sh --uninstall`. The URL is the **base** (no
-`/mcp` suffix — the script adds it).
+Already registered a vault? Drop the url/token — it reads `~/.vault`. Undo with
+`./desktop-setup.sh --uninstall`. The URL is the **base** (no `/mcp` — it's added
+for you). See [`cli/README.md`](cli/README.md) for the full command set.
+
+**Just the binary + integration, manually:**
+
+```
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
+vault config add myvault https://your-vault.example.com <token>
+vault setup        # wire MCP + auto-sync hooks  (vault setup --uninstall to undo)
+```
+
+Slash-command skills (`/vault-mcp` etc.) are optional and not installed by this
+path — the CLI + MCP server cover the functionality.
 
 ### Changing config later (anytime)
 
