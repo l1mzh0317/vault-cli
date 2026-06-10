@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "vault": {
+      "type": "http",
+      "url": "${user_config.vault_url}",
+      "headers": {
+        "Authorization": "Bearer ${user_config.vault_token}"
+      }
+    }
+  }
+}

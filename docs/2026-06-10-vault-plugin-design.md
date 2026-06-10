@@ -76,7 +76,36 @@ now detect a native plugin install (a `hooks.json` under `~/.claude/plugins/`
 that wires `session-log.sh`, or `CLAUDE_PLUGIN_ROOT` in env) and report
 `✅ 插件接管 (plugin)`.
 
+## Two-layer config — `.mcp.json` re-added via userConfig (1.0.3)
+
+The original "no `.mcp.json`" decision was driven by fear of a name collision with
+the user-scope `vault` that `vault-manager` writes. That fear was unfounded:
+Claude Code's documented MCP precedence is `local > project > **user** > **plugin**
+> claude.ai`, so a user-scope `vault` cleanly **overrides** a plugin-bundled one
+(one definition wins, no merge, no error). The downside of shipping no `.mcp.json`
+was real — a bare install showed no MCP server until the user ran `vault-manager`.
+
+1.0.3 ships **both layers**:
+- **Plugin layer:** `.mcp.json` defines `vault` from `${user_config.vault_url}` /
+  `${user_config.vault_token}`; `plugin.json.userConfig` declares those (url has a
+  default; token is `sensitive` → keychain, not `required` so it can be skipped).
+  → MCP server works right after install/enable for single-vault users.
+- **User layer:** `vault-manager` keeps writing a user-scope `vault` entry +
+  registry. User scope overrides the plugin layer → runtime vault switching still
+  works for power users (who leave the install token blank).
+
+No `${VAR:-default}` is supported in plugin configs, but `userConfig.default`
+covers the URL default. userConfig values can only be re-edited via plugin
+disable/re-enable (undocumented otherwise) — multi-vault users sidestep this by
+using vault-manager instead.
+
+## plugin-update skill (1.0.3)
+
+Added `skills/plugin-update/` — a consumer self-update skill: refresh the
+marketplace cache + `claude plugin update vault@vault-plugin` + remind to restart.
+Pure instructions, no script; touches only the plugin version, never config/data.
+
 ## Versioning
 
-`plugin.json` pins `version: 1.0.0`. Must be bumped on each release for users to
-receive updates (commit SHA is not used when version is set).
+`plugin.json` pins an explicit `version` (currently 1.0.3). Must be bumped on each
+release for users to receive updates (commit SHA is not used when version is set).

@@ -1,11 +1,25 @@
 {
   "name": "vault",
   "displayName": "Vault",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Remote document & context store for Claude — MCP tools, multi-vault manager, and automatic session sync.",
   "author": { "name": "l1mzh0317" },
   "homepage": "https://github.com/l1mzh0317/vault-plugin",
   "repository": "https://github.com/l1mzh0317/vault-plugin",
   "license": "MIT",
-  "keywords": ["mcp", "vault", "context", "memory", "session-sync", "claude-code"]
+  "keywords": ["mcp", "vault", "context", "memory", "session-sync", "claude-code"],
+  "userConfig": {
+    "vault_url": {
+      "type": "string",
+      "title": "Vault URL",
+      "description": "Your vault server's MCP endpoint (include the /mcp suffix).",
+      "default": "https://longku-vault.zeabur.app/mcp"
+    },
+    "vault_token": {
+      "type": "string",
+      "title": "Vault token",
+      "description": "Bearer token for your vault. Leave blank if you configure vaults via the vault-manager skill instead (that user-scope config overrides this).",
+      "sensitive": true
+    }
+  }
 }

@@ -10,17 +10,25 @@ A remote document & context store for Claude Code, packaged as a native plugin. 
 > self-hosted service. This plugin is the **client** side — you bring your own
 > vault URL + token.
 
-## Configuration model
+## Configuration model — two layers
 
-There is **one source of truth**: the vault registry at `~/.vault/servers.json`,
-managed by the bundled **`vault-manager`** skill. It holds your vault servers and
-which one is active. Switching the active vault repoints **both**:
+The plugin works for both casual and multi-vault users via Claude Code's MCP
+precedence (`local > project > **user** > **plugin** > claude.ai`):
 
-- the MCP `vault` tools (via `~/.claude/mcp.json`), and
-- the background session-sync hook (which reads the registry directly).
+1. **Plugin layer (`userConfig`)** — the plugin ships its own `.mcp.json` whose
+   `vault` server reads `userConfig` values. On enable, Claude Code prompts for
+   your **Vault URL** (defaults to the public instance) and **token** (stored in
+   the system keychain). This makes the MCP server work **right after install** —
+   no extra setup.
+2. **User layer (`vault-manager`)** — for multiple vaults, the bundled
+   `vault-manager` skill writes a **user-scope** `vault` entry into
+   `~/.claude/mcp.json` plus a registry at `~/.vault/servers.json`. User scope
+   **overrides** the plugin layer, so `vault-manager use <name>` switches the
+   active vault at runtime (the session-sync hook follows instantly; MCP tools
+   reconnect on the next restart).
 
-So your config is **changeable at any time** — just run a `vault-manager` command.
-No environment variables to export, no plugin re-enable dance.
+Single vault → just fill the install prompt. Many vaults → use `vault-manager`
+and leave the install token blank (the user-scope entry wins).
 
 ## Install
 
@@ -29,17 +37,18 @@ No environment variables to export, no plugin re-enable dance.
 /plugin install vault@vault-plugin
 ```
 
-Then register your vault (this writes the registry + `~/.claude/mcp.json` + the
-hook token) and restart Claude Code:
+On enable you'll be prompted for your **Vault URL** + **token** — fill them and
+**restart Claude Code**, then `/mcp` shows the `vault` server connected. That's the
+whole setup for a single vault.
+
+**Multiple vaults instead?** Leave the token prompt blank and register vaults with
+the manager (its user-scope config takes precedence):
 
 ```
 vault-manager add myvault https://your-vault.example.com <your-token>
 ```
 
-(Or, if you already have a `vault` entry in `~/.claude/mcp.json`,
-`vault-manager import myvault` adopts it without re-entering the token.)
-
-After restarting, run `/mcp` to confirm the `vault` server is connected.
+(Or `vault-manager import myvault` to adopt a `vault` entry already in `mcp.json`.)
 
 ### Changing config later (anytime)
 
@@ -74,16 +83,24 @@ Health-check the sync at any time:
 
 | Path | What it is |
 |---|---|
-| `.claude-plugin/plugin.json` | Plugin manifest |
+| `.claude-plugin/plugin.json` | Plugin manifest (+ `userConfig` for Vault URL/token) |
 | `.claude-plugin/marketplace.json` | Marketplace catalog (self-hosted in this repo) |
+| `.mcp.json` | The `vault` MCP server, wired to `userConfig` values |
 | `skills/vault-mcp/` | Skill for working with vault docs/sessions/context sets |
-| `skills/vault-manager/` | Skill + script that owns vault config (the registry) |
+| `skills/vault-manager/` | Skill + script for multi-vault config (the registry; overrides the plugin layer) |
+| `skills/plugin-update/` | Skill to manually update the plugin to the latest published version |
 | `hooks/hooks.json` | Declares the SessionStart/Stop sync hooks |
 | `hooks/session-log.sh` + `hooks/vault_sync.py` | The sync engine (pure stdlib) |
 
-> Note: this plugin intentionally ships **no** `.mcp.json`. The `vault` MCP server
-> is registered into your global `~/.claude/mcp.json` by `vault-manager`, so that
-> the vault is switchable at runtime instead of pinned inside the plugin.
+## Updating the plugin
+
+```
+/vault:plugin-update     # or just ask: "update the vault plugin"
+```
+
+Refreshes the marketplace and updates `vault@vault-plugin` to the latest published
+version (then restart Claude Code). Updates land only when the author bumps the
+version in `plugin.json`.
 
 ## License
 
