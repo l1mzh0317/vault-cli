@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""vault-manager — switch between multiple Vault servers (stdlib only).
+
+A tiny profile manager. One registry holds many named vaults; one is "active".
+Switching rewrites ~/.claude/mcp.json (the MCP `vault` entry) and ~/.vault-token
+(legacy hook compat). The session-sync hook also reads the active server from
+the registry, so `use` repoints BOTH the in-conversation MCP tools and the
+background transcript sync.
+
+Registry  ~/.vault/servers.json
+  {"active": "<name>", "servers": {"<name>": {"url": "...", "token": "..."}}}
+
+Commands
+  add <name> <url> <token>   register (or update) a vault; first one becomes active
+  ls                         list servers (active marked *, tokens masked)
+  use <name>                 make <name> active → rewrite mcp.json + .vault-token
+  rm <name>                  remove a vault
+  current                    print the active vault
+  ping [name|all]            health-check one / the active / all (GET /healthz)
+  import [name]              adopt the vault currently in mcp.json as <name>
+  config                     one-screen dashboard of every local vault setting
+  config logging on|off      toggle background auto-sync (the ~/.vault-logging-on flag)
+"""
+import json
+import os
+import sys
+import urllib.request
+
+HOME = os.path.expanduser("~")
+REG_DIR = os.path.join(HOME, ".vault")
+REG = os.path.join(REG_DIR, "servers.json")
+MCP_JSON = os.path.join(HOME, ".claude", "mcp.json")
+TOKEN_FILE = os.path.join(HOME, ".vault-token")
+FLAG = os.path.join(HOME, ".vault-logging-on")        # auto-sync on/off
+SETTINGS = os.path.join(HOME, ".claude", "settings.json")
+STATE = os.path.join(HOME, ".vault-sync-state.json")
+
+
+# ── registry io ──────────────────────────────────────────────────────────────
+def load():
+    try:
+        with open(REG, encoding="utf-8") as f:
+            d = json.load(f)
+        d.setdefault("servers", {})
+        d.setdefault("active", None)
+        return d
+    except Exception:
+        return {"active": None, "servers": {}}
+
+
+def atomic_write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def save(reg):
+    atomic_write(REG, json.dumps(reg, ensure_ascii=False, indent=2))
+    try:
+        os.chmod(REG, 0o600)  # registry holds tokens
+    except OSError:
+        pass
+
+
+def mask(tok):
+    if not tok:
+        return "(none)"
+    return tok[:6] + "…" + tok[-4:] if len(tok) > 12 else "…"
+
+
+def norm_url(url):
+    url = url.strip().rstrip("/")
+    if url.endswith("/mcp"):
+        url = url[:-4]
+    return url
+
+
+def die(msg):
+    print("✗ " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+# ── mcp.json rewrite (preserve other servers) ────────────────────────────────
+def write_mcp(url, token):
+    try:
+        with open(MCP_JSON, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cfg.setdefault("mcpServers", {})
+    cfg["mcpServers"]["vault"] = {
+        "type": "http",
+        "url": url + "/mcp",
+        "headers": {"Authorization": "Bearer " + token},
+    }
+    atomic_write(MCP_JSON, json.dumps(cfg, ensure_ascii=False, indent=2))
+
+
+def healthz(url, timeout=8):
+    try:
+        req = urllib.request.Request(url + "/healthz")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+def cmd_add(args):
+    if len(args) < 3:
+        die("usage: vault-manager add <name> <url> <token>")
+    name, url, token = args[0], norm_url(args[1]), args[2].strip()
+    reg = load()
+    reg["servers"][name] = {"url": url, "token": token}
+    if not reg["active"]:
+        reg["active"] = name
+    save(reg)
+    star = " (now active)" if reg["active"] == name else ""
+    print(f"✓ added {name} → {url}{star}")
+    if reg["active"] == name:
+        write_mcp(url, token)
+        atomic_write(TOKEN_FILE, token + "\n")
+        print("  rewrote mcp.json + .vault-token — restart Claude Code for MCP")
+
+
+def cmd_ls(args):
+    reg = load()
+    if not reg["servers"]:
+        print("(no vaults registered — `vault-manager add <name> <url> <token>`)")
+        return
+    for name, s in reg["servers"].items():
+        m = "*" if name == reg["active"] else " "
+        print(f"{m} {name:<14} {s['url']:<38} {mask(s.get('token',''))}")
+
+
+def cmd_use(args):
+    if not args:
+        die("usage: vault-manager use <name>")
+    name = args[0]
+    reg = load()
+    if name not in reg["servers"]:
+        die(f"unknown vault '{name}' — `vault-manager ls` to see registered ones")
+    s = reg["servers"][name]
+    reg["active"] = name
+    save(reg)
+    write_mcp(s["url"], s["token"])
+    atomic_write(TOKEN_FILE, s["token"] + "\n")
+    up = "✓ reachable" if healthz(s["url"]) else "⚠ unreachable"
+    print(f"✓ active vault → {name} ({s['url']})  {up}")
+    print("  mcp.json + .vault-token updated. Restart Claude Code to load MCP tools.")
+
+
+def cmd_rm(args):
+    if not args:
+        die("usage: vault-manager rm <name>")
+    name = args[0]
+    reg = load()
+    if name not in reg["servers"]:
+        die(f"unknown vault '{name}'")
+    del reg["servers"][name]
+    if reg["active"] == name:
+        reg["active"] = next(iter(reg["servers"]), None)
+    save(reg)
+    print(f"✓ removed {name}" + (f" — active now {reg['active']}" if reg["active"] else ""))
+
+
+def cmd_current(args):
+    reg = load()
+    name = reg["active"]
+    if not name:
+        print("(no active vault)")
+        return
+    s = reg["servers"][name]
+    print(f"{name}  {s['url']}  {mask(s.get('token',''))}")
+
+
+def cmd_ping(args):
+    reg = load()
+    target = args[0] if args else (reg["active"] or "all")
+    if target == "all":
+        names = list(reg["servers"])
+    elif target in reg["servers"]:
+        names = [target]
+    else:
+        die(f"unknown vault '{target}'")
+    for name in names:
+        ok = healthz(reg["servers"][name]["url"])
+        print(f"{'✓' if ok else '✗'} {name:<14} {reg['servers'][name]['url']}")
+
+
+def cmd_import(args):
+    """Adopt the vault currently in mcp.json (+ .vault-token) as a named server."""
+    try:
+        with open(MCP_JSON, encoding="utf-8") as f:
+            v = json.load(f)["mcpServers"]["vault"]
+        url = norm_url(v["url"])
+        token = v["headers"]["Authorization"].split()[-1]
+    except Exception as e:
+        die(f"could not read vault from {MCP_JSON}: {e}")
+    name = args[0] if args else (url.split("//")[-1].split(".")[0] or "default")
+    reg = load()
+    reg["servers"][name] = {"url": url, "token": token}
+    if not reg["active"]:
+        reg["active"] = name
+    save(reg)
+    print(f"✓ imported current vault as '{name}' → {url}"
+          + ("  (active)" if reg["active"] == name else ""))
+
+
+def _logging_on():
+    return os.path.exists(FLAG)
+
+
+def _hooks_registered():
+    """(SessionStart, Stop) — whether the vault sync hook is wired in CC."""
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            h = json.load(f).get("hooks", {})
+    except Exception:
+        return False, False
+
+    def has(event):
+        for grp in h.get(event, []):
+            for hook in grp.get("hooks", []):
+                cmd = hook.get("command", "")
+                if "session-log" in cmd or "vault" in cmd:
+                    return True
+        return False
+    return has("SessionStart"), has("Stop")
+
+
+def _state_count():
+    try:
+        with open(STATE, encoding="utf-8") as f:
+            return len(json.load(f))
+    except Exception:
+        return 0
+
+
+def cmd_config(args):
+    # setter: vault-manager config logging on|off
+    if args and args[0] == "logging":
+        if len(args) < 2 or args[1] not in ("on", "off"):
+            die("usage: vault-manager config logging on|off")
+        if args[1] == "on":
+            open(FLAG, "a").close()
+            print("✓ 自动同步已开启（会话启动/退出时同步 transcript → Vault）")
+        else:
+            try:
+                os.remove(FLAG)
+            except FileNotFoundError:
+                pass
+            print("✓ 自动同步已关闭（手动 once / sync-rebuild 仍可用）")
+        return
+
+    # dashboard: one place to see every local vault setting
+    reg = load()
+    active = reg.get("active")
+    print("龙库 · Vault 配置")
+    print("─" * 48)
+    if active and active in reg["servers"]:
+        s = reg["servers"][active]
+        up = "✓ 可达" if healthz(s["url"]) else "⚠ 不可达"
+        print(f"  活跃 vault    {active}  {s['url']}  {up}")
+        print(f"  token         ✅ {mask(s.get('token', ''))}")
+    else:
+        print("  活跃 vault    (无 — `vault-manager add <name> <url> <token>`)")
+    names = ", ".join((n + "*" if n == active else n) for n in reg["servers"]) or "(无)"
+    print(f"  已注册        {len(reg['servers'])} 个: {names}")
+    print(f"  自动同步      {'✅ 开' if _logging_on() else '⬜ 关'}   (~/.vault-logging-on)")
+    ss, st = _hooks_registered()
+    hk = ("✅ 已注册" if ss and st
+          else f"❌ 缺失 (SessionStart={'✓' if ss else '✗'} Stop={'✓' if st else '✗'}) → 跑 hooks/install.sh")
+    print(f"  CC hooks      {hk}")
+    print(f"  同步状态      {_state_count()} 条 transcript 已记录")
+    print("─" * 48)
+    print("  改: use <name> | config logging on|off | add <name> <url> <token>")
+
+
+CMDS = {"add": cmd_add, "ls": cmd_ls, "list": cmd_ls, "use": cmd_use,
+        "rm": cmd_rm, "remove": cmd_rm, "current": cmd_current,
+        "ping": cmd_ping, "import": cmd_import, "config": cmd_config}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd = sys.argv[1]
+    fn = CMDS.get(cmd)
+    if not fn:
+        die(f"unknown command '{cmd}' — see `vault-manager help`")
+    fn(sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()
