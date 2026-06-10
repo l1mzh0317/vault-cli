@@ -8,16 +8,8 @@
 //     Claude Code's hook lifecycle. This compiles to ONE static binary (no
 //     runtime) and any agent/harness can call it via a shell.
 //
-// Split of responsibilities: use the remote MCP server for READS/queries
-// (small payloads the model needs anyway); use this CLI for WRITES/bulk
-// (large payloads that must stay out of context).
-//
-// Commands:
-//
-//	vault sync [--resync] [--meta]   scan ~/.claude/projects/**/*.jsonl → vault
-//	vault push <file> [--path P]     upload a local file as a doc (write_doc)
-//	vault doctor                     config + reachability health check
-//	vault version
+// Commands: see usage() or `vault` with no args. Global flag --json prints raw
+// JSON for read commands (handy for scripts/agents).
 //
 // Config precedence (mirrors the python engine):
 //
@@ -38,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -50,7 +43,10 @@ const (
 	defaultURL = "https://longku-vault.zeabur.app"
 )
 
-var httpClient = &http.Client{Timeout: 30 * time.Second}
+var (
+	httpClient = &http.Client{Timeout: 30 * time.Second}
+	jsonOut    bool // --json: print raw JSON instead of formatted output
+)
 
 func home() string { h, _ := os.UserHomeDir(); return h }
 
@@ -100,7 +96,7 @@ func token() string {
 }
 
 // ── vault http ───────────────────────────────────────────────────────────────
-// quotePath escapes each path segment but keeps the "/" separators, matching
+// quotePath escapes each path segment but keeps "/" separators, matching
 // python's urllib.parse.quote(path) (default safe="/").
 func quotePath(p string) string {
 	segs := strings.Split(p, "/")
@@ -158,8 +154,7 @@ func vaultCallTool(name string, args map[string]any) (map[string]any, error) {
 	}
 	var data map[string]any
 	if json.Unmarshal(raw, &data) != nil {
-		// tolerate SSE 'data: {...}' framing
-		for _, line := range strings.Split(string(raw), "\n") {
+		for _, line := range strings.Split(string(raw), "\n") { // tolerate SSE
 			line = strings.TrimSpace(line)
 			if after, ok := strings.CutPrefix(line, "data:"); ok {
 				_ = json.Unmarshal([]byte(strings.TrimSpace(after)), &data)
@@ -178,8 +173,7 @@ func vaultCallTool(name string, args map[string]any) (map[string]any, error) {
 	return data, nil
 }
 
-// toolText pulls the first content text block out of an MCP tool result, e.g.
-// the server's "invalid path" message.
+// toolText pulls the first content text block out of an MCP tool result.
 func toolText(res map[string]any) string {
 	if c, ok := res["content"].([]any); ok && len(c) > 0 {
 		if m, ok := c[0].(map[string]any); ok {
@@ -188,7 +182,16 @@ func toolText(res map[string]any) string {
 			}
 		}
 	}
-	return "isError"
+	return ""
+}
+
+// callText calls a tool and returns its text payload.
+func callText(name string, args map[string]any) (string, error) {
+	res, err := vaultCallTool(name, args)
+	if err != nil {
+		return "", err
+	}
+	return toolText(res), nil
 }
 
 // ── transcript parsing (ports python extract_body / pretty_project) ──────────
@@ -242,7 +245,7 @@ func scanLines(path string) (*bufio.Scanner, *os.File, error) {
 		return nil, nil, err
 	}
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1024*1024), 64*1024*1024) // tolerate long lines
+	sc.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 	return sc, f, nil
 }
 
@@ -330,8 +333,7 @@ func sessionID(path string) string {
 }
 
 func docNameFor(path string) string {
-	proj := prettyProject(filepath.Base(filepath.Dir(path)))
-	return "sessions/" + proj + "/" + sessionID(path)
+	return "sessions/" + prettyProject(filepath.Base(filepath.Dir(path))) + "/" + sessionID(path)
 }
 
 func iterTranscripts() []string {
@@ -385,7 +387,7 @@ func saveState(m map[string]stEntry) {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
-// ── commands ─────────────────────────────────────────────────────────────────
+// ── local sync ───────────────────────────────────────────────────────────────
 func cmdSync(force, metaFlag bool) {
 	if token() == "" {
 		die(errors.New("no vault token (set one via vault-manager, env VAULT_TOKEN, or ~/.vault-token)"))
@@ -449,22 +451,222 @@ func sessionMeta(jl, body string) map[string]any {
 	}
 }
 
+// ── sessions ─────────────────────────────────────────────────────────────────
+func cmdSessions(project, tag, since string, limit int) {
+	args := map[string]any{}
+	if project != "" {
+		args["project"] = project
+	}
+	if tag != "" {
+		args["tag"] = tag
+	}
+	if since != "" {
+		args["since"] = since
+	}
+	if limit > 0 {
+		args["limit"] = limit
+	}
+	txt, err := callText("list_sessions", args)
+	if err != nil {
+		die(err)
+	}
+	if jsonOut {
+		fmt.Println(txt)
+		return
+	}
+	var ss []map[string]any
+	_ = json.Unmarshal([]byte(txt), &ss)
+	if len(ss) == 0 {
+		fmt.Println("(no sessions)")
+		return
+	}
+	byProj := map[string][]map[string]any{}
+	for _, s := range ss {
+		byProj[str(s["project"])] = append(byProj[str(s["project"])], s)
+	}
+	projs := keysSorted(byProj)
+	fmt.Printf("%d sessions:\n", len(ss))
+	for _, p := range projs {
+		fmt.Printf("\n▸ %s\n", p)
+		for _, s := range byProj[p] {
+			fmt.Printf("    %-11s %-28s [%s]\n", str(s["date"]), str(s["session_id"]), tagsOf(s))
+			if lbl := str(s["label"]); lbl != "" {
+				fmt.Printf("               %s\n", lbl)
+			}
+		}
+	}
+}
+
+func cmdRebuild(project, id string) {
+	txt, err := callText("rebuild_session", map[string]any{"project": project, "session_id": id})
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+func cmdRmSession(project, id string) {
+	txt, err := callText("delete_session", map[string]any{"project": project, "session_id": id})
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+// ── docs: read ───────────────────────────────────────────────────────────────
+func printList(name string, args map[string]any) {
+	txt, err := callText(name, args)
+	if err != nil {
+		die(err)
+	}
+	if jsonOut {
+		fmt.Println(txt)
+		return
+	}
+	var items []string
+	if json.Unmarshal([]byte(txt), &items) != nil {
+		fmt.Println(txt)
+		return
+	}
+	if len(items) == 0 {
+		fmt.Println("(none)")
+		return
+	}
+	for _, it := range items {
+		fmt.Println(it)
+	}
+}
+
+func cmdCat(path, as string) {
+	txt, err := callText("read_doc", map[string]any{"path": path, "face": as})
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+// ── docs: write ──────────────────────────────────────────────────────────────
 func cmdPush(file, path string) {
 	b, err := os.ReadFile(file)
 	if err != nil {
 		die(err)
 	}
 	if path == "" {
-		// vault doc paths can't carry a file extension — strip it.
 		base := filepath.Base(file)
 		path = "docs/" + strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	if _, err := vaultCallTool("write_doc", map[string]any{"path": path, "content": string(b)}); err != nil {
-		die(err)
-	}
-	fmt.Printf("pushed %s → %s (%d bytes)\n", file, path, len(b))
+	writeDoc(path, string(b), fmt.Sprintf("pushed %s → %s (%d bytes)", file, path, len(b)))
 }
 
+func cmdWrite(path string) {
+	b, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		die(err)
+	}
+	writeDoc(path, string(b), fmt.Sprintf("wrote %s (%d bytes from stdin)", path, len(b)))
+}
+
+func writeDoc(path, content, okMsg string) {
+	if _, err := vaultCallTool("write_doc", map[string]any{"path": path, "content": content}); err != nil {
+		die(err)
+	}
+	fmt.Println(okMsg)
+}
+
+func cmdMutate(tool, from, to string) { // delete/move/copy
+	args := map[string]any{}
+	switch tool {
+	case "delete_doc":
+		args["path"] = from
+	default:
+		args["from"], args["to"] = from, to
+	}
+	txt, err := callText(tool, args)
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+// ── contexts ─────────────────────────────────────────────────────────────────
+func cmdContexts() {
+	txt, err := callText("list_contexts", map[string]any{})
+	if err != nil {
+		die(err)
+	}
+	if jsonOut {
+		fmt.Println(txt)
+		return
+	}
+	var cs []map[string]any
+	_ = json.Unmarshal([]byte(txt), &cs)
+	if len(cs) == 0 {
+		fmt.Println("(no context sets)")
+		return
+	}
+	fmt.Printf("%-28s %-9s %8s %8s\n", "NAME", "FACE", "MEMBERS", "TOKENS")
+	for _, c := range cs {
+		fmt.Printf("%-28s %-9s %8s %8s\n", str(c["name"]), str(c["face"]),
+			numStr(c["member_count"]), numStr(c["tokens"]))
+	}
+}
+
+func cmdContext(name, as string) {
+	args := map[string]any{"name": name}
+	if as != "" {
+		args["face"] = as
+	}
+	txt, err := callText("get_context", args)
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+func cmdContextCreate(name, face, prompt string, memberSpecs []string) {
+	members := make([]map[string]any, 0, len(memberSpecs))
+	for _, m := range memberSpecs {
+		path, kind := m, "doc"
+		if i := strings.LastIndex(m, ":"); i >= 0 {
+			path, kind = m[:i], m[i+1:]
+		}
+		members = append(members, map[string]any{"path": path, "kind": kind, "enabled": true})
+	}
+	args := map[string]any{"name": name, "face": face, "members": members}
+	if prompt != "" {
+		args["build_prompt"] = prompt
+	}
+	txt, err := callText("create_context", args)
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+func cmdBuild(name string, force bool, prompt string) {
+	args := map[string]any{"name": name}
+	if force {
+		args["force"] = true
+	}
+	if prompt != "" {
+		args["prompt"] = prompt
+	}
+	txt, err := callText("build_context", args)
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+func cmdBuildStatus(name string) {
+	txt, err := callText("build_status", map[string]any{"name": name})
+	if err != nil {
+		die(err)
+	}
+	fmt.Println(txt)
+}
+
+// ── doctor ───────────────────────────────────────────────────────────────────
 func cmdDoctor() {
 	ok, no := "OK", "MISSING"
 	tok := token()
@@ -489,53 +691,238 @@ func cmdDoctor() {
 	fmt.Printf("  synced state  : %d tracked\n", len(loadState()))
 }
 
+// ── helpers ──────────────────────────────────────────────────────────────────
+func str(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func numStr(v any) string {
+	if f, ok := v.(float64); ok {
+		return fmt.Sprintf("%d", int(f))
+	}
+	return str(v)
+}
+
+func tagsOf(s map[string]any) string {
+	if arr, ok := s["tags"].([]any); ok {
+		ts := make([]string, 0, len(arr))
+		for _, t := range arr {
+			ts = append(ts, str(t))
+		}
+		return strings.Join(ts, ",")
+	}
+	return ""
+}
+
+func keysSorted[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
 func die(err error) { fmt.Fprintln(os.Stderr, "✗ "+err.Error()); os.Exit(1) }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `vault — context store CLI
+// parseArgs parses a flagset while tolerating flags placed AFTER positionals
+// (Go's flag pkg stops at the first positional). Returns the positional args.
+func parseArgs(fs *flag.FlagSet, args []string) []string {
+	var pos []string
+	for len(args) > 0 {
+		_ = fs.Parse(args)
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	return pos
+}
 
-  vault sync [--resync] [--meta]   scan transcripts → vault (token-free upload)
-  vault push <file> [--path P]     upload a local file as a doc
-  vault doctor                     config + reachability check
+func need(pos []string, n int, msg string) {
+	if len(pos) < n {
+		die(errors.New(msg))
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, `vault — context store CLI   (global: --json for raw output)
+
+sessions
+  vault sessions [--project P] [--tag T] [--since YYYY-MM-DD] [--limit N]
+  vault rebuild <project> <id>          re-summarize a session's refined face
+  vault rm-session <project> <id>       delete a session
+
+docs (read)
+  vault ls [folder]                     list docs
+  vault folders                         list folders
+  vault find <query>                    search docs by name
+  vault cat <path> [--as source|refined]   read a doc
+
+docs (write)
+  vault push <file> [--path P]          upload a local file as a doc
+  vault write <path>                    write a doc from stdin
+  vault rm <path>                       delete a doc
+  vault mv <from> <to>                  move/rename a doc
+  vault cp <from> <to>                  copy a doc
+
+context sets
+  vault contexts                        list context sets
+  vault context <name> [--as source|refined|structured]   get/mount a context
+  vault context-create <name> [--face F] [--prompt P] --member path[:kind] ...
+  vault build <name> [--force] [--prompt P]   distill a context set (async)
+  vault build-status <name>             check build progress
+
+local / meta
+  vault sync [--resync] [--meta]        scan transcripts → vault
+  vault doctor                          config + reachability check
   vault version`)
 }
 
 func main() {
+	// strip a global --json from anywhere in the args
+	args := make([]string, 0, len(os.Args))
+	for _, a := range os.Args {
+		if a == "--json" || a == "-json" {
+			jsonOut = true
+			continue
+		}
+		args = append(args, a)
+	}
+	os.Args = args
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
+	rest := os.Args[2:]
 	switch os.Args[1] {
+
+	case "sessions":
+		fs := flag.NewFlagSet("sessions", flag.ExitOnError)
+		project := fs.String("project", "", "filter by project")
+		tag := fs.String("tag", "", "filter by tag")
+		since := fs.String("since", "", "only since YYYY-MM-DD")
+		limit := fs.Int("limit", 0, "max results")
+		parseArgs(fs, rest)
+		cmdSessions(*project, *tag, *since, *limit)
+
+	case "rebuild":
+		pos := parseArgs(flag.NewFlagSet("rebuild", flag.ExitOnError), rest)
+		need(pos, 2, "usage: vault rebuild <project> <id>")
+		cmdRebuild(pos[0], pos[1])
+
+	case "rm-session":
+		pos := parseArgs(flag.NewFlagSet("rm-session", flag.ExitOnError), rest)
+		need(pos, 2, "usage: vault rm-session <project> <id>")
+		cmdRmSession(pos[0], pos[1])
+
+	case "ls":
+		pos := parseArgs(flag.NewFlagSet("ls", flag.ExitOnError), rest)
+		a := map[string]any{}
+		if len(pos) > 0 {
+			a["folder"] = pos[0]
+		}
+		printList("list_docs", a)
+
+	case "folders":
+		printList("list_folders", map[string]any{})
+
+	case "find":
+		pos := parseArgs(flag.NewFlagSet("find", flag.ExitOnError), rest)
+		need(pos, 1, "usage: vault find <query>")
+		printList("find_docs", map[string]any{"query": pos[0]})
+
+	case "cat":
+		fs := flag.NewFlagSet("cat", flag.ExitOnError)
+		as := fs.String("as", "source", "view: source|refined")
+		pos := parseArgs(fs, rest)
+		need(pos, 1, "usage: vault cat <path> [--as source|refined]")
+		cmdCat(pos[0], *as)
+
+	case "push":
+		fs := flag.NewFlagSet("push", flag.ExitOnError)
+		path := fs.String("path", "", "vault doc path (default docs/<filename>)")
+		pos := parseArgs(fs, rest)
+		need(pos, 1, "usage: vault push <file> [--path P]")
+		cmdPush(pos[0], *path)
+
+	case "write":
+		pos := parseArgs(flag.NewFlagSet("write", flag.ExitOnError), rest)
+		need(pos, 1, "usage: vault write <path>   (content from stdin)")
+		cmdWrite(pos[0])
+
+	case "rm":
+		pos := parseArgs(flag.NewFlagSet("rm", flag.ExitOnError), rest)
+		need(pos, 1, "usage: vault rm <path>")
+		cmdMutate("delete_doc", pos[0], "")
+
+	case "mv":
+		pos := parseArgs(flag.NewFlagSet("mv", flag.ExitOnError), rest)
+		need(pos, 2, "usage: vault mv <from> <to>")
+		cmdMutate("move_doc", pos[0], pos[1])
+
+	case "cp":
+		pos := parseArgs(flag.NewFlagSet("cp", flag.ExitOnError), rest)
+		need(pos, 2, "usage: vault cp <from> <to>")
+		cmdMutate("copy_doc", pos[0], pos[1])
+
+	case "contexts":
+		cmdContexts()
+
+	case "context":
+		fs := flag.NewFlagSet("context", flag.ExitOnError)
+		as := fs.String("as", "", "view: source|refined|structured")
+		pos := parseArgs(fs, rest)
+		need(pos, 1, "usage: vault context <name> [--as source|refined|structured]")
+		cmdContext(pos[0], *as)
+
+	case "context-create":
+		fs := flag.NewFlagSet("context-create", flag.ExitOnError)
+		face := fs.String("face", "refined", "source|refined")
+		prompt := fs.String("prompt", "", "custom build prompt")
+		var members []string
+		fs.Func("member", "path[:kind] (repeatable; kind defaults to doc)", func(s string) error {
+			members = append(members, s)
+			return nil
+		})
+		pos := parseArgs(fs, rest)
+		need(pos, 1, "usage: vault context-create <name> [--face F] [--prompt P] --member path[:kind] ...")
+		cmdContextCreate(pos[0], *face, *prompt, members)
+
+	case "build":
+		fs := flag.NewFlagSet("build", flag.ExitOnError)
+		force := fs.Bool("force", false, "force rebuild")
+		prompt := fs.String("prompt", "", "custom prompt")
+		pos := parseArgs(fs, rest)
+		need(pos, 1, "usage: vault build <name> [--force] [--prompt P]")
+		cmdBuild(pos[0], *force, *prompt)
+
+	case "build-status":
+		pos := parseArgs(flag.NewFlagSet("build-status", flag.ExitOnError), rest)
+		need(pos, 1, "usage: vault build-status <name>")
+		cmdBuildStatus(pos[0])
+
 	case "sync":
 		fs := flag.NewFlagSet("sync", flag.ExitOnError)
 		force := fs.Bool("resync", false, "forget state and re-upload everything")
 		meta := fs.Bool("meta", false, "also register session metadata (list_sessions)")
-		_ = fs.Parse(os.Args[2:])
+		parseArgs(fs, rest)
 		cmdSync(*force, *meta)
-	case "push":
-		fs := flag.NewFlagSet("push", flag.ExitOnError)
-		path := fs.String("path", "", "vault doc path (default docs/<filename>)")
-		// Go's flag pkg stops at the first positional, so loop to also accept
-		// flags placed AFTER the file: `vault push <file> --path P`.
-		args, file := os.Args[2:], ""
-		for len(args) > 0 {
-			_ = fs.Parse(args)
-			if fs.NArg() == 0 {
-				break
-			}
-			if file == "" {
-				file = fs.Arg(0)
-			}
-			args = fs.Args()[1:]
-		}
-		if file == "" {
-			die(errors.New("usage: vault push <file> [--path P]"))
-		}
-		cmdPush(file, *path)
+
 	case "doctor":
 		cmdDoctor()
+
 	case "version", "-v", "--version":
 		fmt.Println("vault " + version)
+
 	default:
 		usage()
 		os.Exit(2)

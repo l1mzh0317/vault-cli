@@ -48,19 +48,54 @@ go install github.com/l1mzh0317/vault-plugin/cli@latest   # installs as `cli`
 
 ## Usage
 
+Global flag `--json` prints raw JSON for read commands (for scripts/agents).
+
 ```
-vault sync [--resync] [--meta]   scan ~/.claude/projects/**/*.jsonl → vault
-vault push <file> [--path P]     upload a local file as a doc (write_doc)
-vault doctor                     config + reachability health check
+# sessions
+vault sessions [--project P] [--tag T] [--since YYYY-MM-DD] [--limit N]
+vault rebuild <project> <id>          re-summarize a session's refined face
+vault rm-session <project> <id>       delete a session
+
+# docs — read
+vault ls [folder]                     list docs
+vault folders                         list folders
+vault find <query>                    search docs by name
+vault cat <path> [--as source|refined]   read a doc
+
+# docs — write
+vault push <file> [--path P]          upload a local file as a doc
+vault write <path>                    write a doc from stdin
+vault rm <path>                       delete a doc
+vault mv <from> <to>                  move/rename a doc
+vault cp <from> <to>                  copy a doc
+
+# context sets
+vault contexts                        list context sets
+vault context <name> [--as source|refined|structured]   get/mount a context
+vault context-create <name> [--face F] [--prompt P] --member path[:kind] ...
+vault build <name> [--force] [--prompt P]   distill a context set (async)
+vault build-status <name>             check build progress
+
+# local / meta
+vault sync [--resync] [--meta]        scan transcripts → vault
+vault doctor                          config + reachability check
 vault version
 ```
 
+Notes:
+
+- **Reads** (`sessions`, `ls`, `find`, `cat`, `contexts`, `context`) go through
+  the vault's MCP endpoint; results are small and land in your terminal. Use
+  the remote MCP server instead when you want these inside a model.
+- **Writes** (`push`, `write`, `sync`) read content locally and ship it straight
+  to the vault — it never passes through a model's context.
+- `--as` picks which face of a doc/context to read: `source` (raw), `refined`
+  (LLM summary), or `structured` (a built context package).
 - `sync` mirrors the python engine exactly (same `~/.vault-sync-state.json`,
-  same `## role` rendering, same `MAX_BODY`), so the two are interchangeable.
-  `--meta` (or `~/.vault-session-meta-on`) also registers each session in
-  `list_sessions`.
-- `push` uploads any local file as a doc. Doc paths **can't carry a file
-  extension** — the default path strips it (`notes.md` → `docs/notes`).
+  `## role` rendering, `MAX_BODY`) — the two are interchangeable. `--meta`
+  (or `~/.vault-session-meta-on`) also registers each session in `list_sessions`.
+- Doc paths **can't carry a file extension**; `push`'s default path strips it
+  (`notes.md` → `docs/notes`).
 - Set `VAULT_DEBUG=1` to dump raw vault responses.
 
 ## Config
