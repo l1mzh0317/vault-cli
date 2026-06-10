@@ -12,57 +12,34 @@ description: >-
 
 # Vault MCP — Remote Document & Context Server
 
-**URL:** `https://longku-vault.zeabur.app/mcp`
-**Auth:** Bearer token in `~/.claude/mcp.json`
+**URL:** your vault's MCP endpoint (default `https://longku-vault.zeabur.app/mcp`)
+**Auth:** Bearer token, supplied via the `vault-manager` registry (not hardcoded)
 **Protocol:** HTTP MCP (JSON-RPC over POST)
 
 ## Installation
 
-在 `~/.claude/mcp.json`（全局，所有项目生效）或项目根目录 `.mcp.json`（仅当前项目）中添加：
+This skill ships inside the **`vault` plugin** — install it once and both skills
+(`vault-mcp`, `vault-manager`) plus the session-sync hook come together:
 
-```json
-{
-  "mcpServers": {
-    "vault": {
-      "type": "http",
-      "url": "https://longku-vault.zeabur.app/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-token>"
-      }
-    }
-  }
-}
+```
+/plugin marketplace add l1mzh0317/vault-plugin
+/plugin install vault@vault-plugin
 ```
 
-Skill 文件放在 `~/.claude/skills/vault-mcp/SKILL.md`，Claude Code 会自动发现并加载。
+Then point it at your vault. The plugin owns **no** `.mcp.json`; the `vault-manager`
+skill registers the MCP server into `~/.claude/mcp.json` and the registry, so the
+vault is switchable at runtime:
 
-### 获取 token
-
-Token 由 vault 管理员分发。拿到后在终端写入配置：
-
-```bash
-TOKEN="<your-token>"
-
-# 全局安装
-mkdir -p ~/.claude/skills/vault-mcp
-cat > ~/.claude/mcp.json << EOF
-{
-  "mcpServers": {
-    "vault": {
-      "type": "http",
-      "url": "https://longku-vault.zeabur.app/mcp",
-      "headers": {
-        "Authorization": "Bearer $TOKEN"
-      }
-    }
-  }
-}
-EOF
 ```
+vault-manager add myvault https://your-vault.example.com <your-token>
+```
+
+(Or `vault-manager import myvault` to adopt a `vault` entry already in `mcp.json`.)
 
 ### 验证
 
-重启 Claude Code 后，输入 `/mcp` 应能看到 vault server 的资源列表；或直接说 "list sessions" 测试。
+重启 Claude Code 后，输入 `/mcp` 应能看到 vault server；或直接说 "list sessions" 测试。
+切换/查看配置用 `vault-manager use <name>` / `vault-manager config`。
 
 ## Overview
 

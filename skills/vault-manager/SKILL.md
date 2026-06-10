@@ -58,7 +58,7 @@ scattered files (registry, logging flag, token, mcp.json, CC settings):
   token         ✅ 0052c3…ccde
   已注册        2 个: longku*, home
   自动同步      ✅ 开   (~/.vault-logging-on)
-  CC hooks      ✅ 已注册
+  CC hooks      ✅ 插件接管 (plugin)
   同步状态      3 条 transcript 已记录
 ────────────────────────────────────────────────
   改: use <name> | config logging on|off | add <name> <url> <token>
@@ -66,8 +66,9 @@ scattered files (registry, logging flag, token, mcp.json, CC settings):
 
 - **活跃 vault / token / 已注册** — from the registry (`use` / `add` / `rm` to change).
 - **自动同步** — `config logging on|off` (background sync on session start/stop).
-- **CC hooks** — whether the sync hook is wired into `settings.json`; if ❌, run the
-  repo's `hooks/install.sh` once.
+- **CC hooks** — whether the session-sync hook is active. Installed as a native plugin,
+  it shows `✅ 插件接管 (plugin)` (the hook lives in the plugin's `hooks.json`, not
+  `settings.json`). If ❌, install/enable the plugin: `/plugin install vault@vault-plugin`.
 - **同步状态** — how many transcripts the sync engine is tracking.
 
 When the user asks "看一下 vault 配置 / 现在都是什么设置 / 关掉自动同步", run `config`
