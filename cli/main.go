@@ -626,11 +626,16 @@ func cmdContext(name, as string) {
 func cmdContextCreate(name, face, prompt string, memberSpecs []string) {
 	members := make([]map[string]any, 0, len(memberSpecs))
 	for _, m := range memberSpecs {
-		path, kind := m, "doc"
-		if i := strings.LastIndex(m, ":"); i >= 0 {
-			path, kind = m[:i], m[i+1:]
+		// path[:kind[:on|off]]   kind defaults to doc, enabled defaults to on
+		parts := strings.Split(m, ":")
+		path, kind, enabled := parts[0], "doc", true
+		if len(parts) >= 2 && parts[1] != "" {
+			kind = parts[1]
 		}
-		members = append(members, map[string]any{"path": path, "kind": kind, "enabled": true})
+		if len(parts) >= 3 {
+			enabled = parseEnabled(parts[2])
+		}
+		members = append(members, map[string]any{"path": path, "kind": kind, "enabled": enabled})
 	}
 	args := map[string]any{"name": name, "face": face, "members": members}
 	if prompt != "" {
@@ -731,6 +736,154 @@ func keysSorted[V any](m map[string]V) []string {
 
 func die(err error) { fmt.Fprintln(os.Stderr, "✗ "+err.Error()); os.Exit(1) }
 
+func parseEnabled(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "false", "0", "no", "disabled", "disable":
+		return false
+	}
+	return true
+}
+
+// confirmOrDie guards destructive ops. --yes skips; otherwise prompt on a TTY,
+// or refuse outright when non-interactive (safe for scripts/agents).
+func confirmOrDie(yes bool, action string) {
+	if yes {
+		return
+	}
+	if fi, _ := os.Stdin.Stat(); fi == nil || fi.Mode()&os.ModeCharDevice == 0 {
+		die(fmt.Errorf("refusing to %s without --yes (non-interactive)", action))
+	}
+	fmt.Fprintf(os.Stderr, "%s? [y/N] ", action)
+	var ans string
+	_, _ = fmt.Scanln(&ans)
+	if a := strings.ToLower(strings.TrimSpace(ans)); a != "y" && a != "yes" {
+		die(errors.New("aborted"))
+	}
+}
+
+// ── registry / config ────────────────────────────────────────────────────────
+type registry struct {
+	Active  string            `json:"active"`
+	Servers map[string]server `json:"servers"`
+}
+
+func registryPath() string { return filepath.Join(home(), ".vault", "servers.json") }
+
+func loadRegistry() registry {
+	r := registry{Servers: map[string]server{}}
+	if b, err := os.ReadFile(registryPath()); err == nil {
+		_ = json.Unmarshal(b, &r)
+	}
+	if r.Servers == nil {
+		r.Servers = map[string]server{}
+	}
+	return r
+}
+
+func saveRegistry(r registry) error {
+	if err := os.MkdirAll(filepath.Dir(registryPath()), 0o700); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(r, "", "  ")
+	tmp := registryPath() + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, registryPath())
+}
+
+func mask(t string) string {
+	if t == "" {
+		return "(none)"
+	}
+	if len(t) > 12 {
+		return t[:6] + "…" + t[len(t)-4:]
+	}
+	return "…"
+}
+
+func tokenSource() string {
+	if os.Getenv("VAULT_TOKEN") != "" {
+		return "env VAULT_TOKEN"
+	}
+	if registryActive().Token != "" {
+		return "registry: " + loadRegistry().Active
+	}
+	if fileExists(filepath.Join(home(), ".vault-token")) {
+		return "~/.vault-token"
+	}
+	return "none"
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+func cmdConfig() {
+	r := loadRegistry()
+	fmt.Println("vault CLI · config")
+	fmt.Println(strings.Repeat("-", 44))
+	fmt.Printf("  resolved base url : %s\n", baseURL())
+	fmt.Printf("  token             : %s  (from %s)\n", mask(token()), tokenSource())
+	fmt.Printf("  registry          : %s\n", registryPath())
+	fmt.Printf("  active vault      : %s\n", or(r.Active, "(none)"))
+	if len(r.Servers) > 0 {
+		fmt.Println("  registered vaults :")
+		for _, name := range keysSorted(r.Servers) {
+			mark := " "
+			if name == r.Active {
+				mark = "*"
+			}
+			s := r.Servers[name]
+			fmt.Printf("    %s %-14s %-38s %s\n", mark, name, s.URL, mask(s.Token))
+		}
+	}
+	fmt.Printf("  logging flag      : %s  (~/.vault-logging-on)\n",
+		onOff(fileExists(filepath.Join(home(), ".vault-logging-on"))))
+	fmt.Printf("  session-meta flag : %s  (~/.vault-session-meta-on)\n",
+		onOff(fileExists(filepath.Join(home(), ".vault-session-meta-on"))))
+	fmt.Printf("  sync state        : %d tracked (%s)\n", len(loadState()), statePath())
+}
+
+func or(s, alt string) string {
+	if s == "" {
+		return alt
+	}
+	return s
+}
+
+func cmdConfigUse(name string) {
+	r := loadRegistry()
+	if _, ok := r.Servers[name]; !ok {
+		die(fmt.Errorf("unknown vault %q (vault config to list)", name))
+	}
+	r.Active = name
+	if err := saveRegistry(r); err != nil {
+		die(err)
+	}
+	fmt.Printf("✓ active vault → %s (%s)\n", name, r.Servers[name].URL)
+}
+
+func cmdConfigAdd(name, urlArg, tok string) {
+	u := strings.TrimSuffix(strings.TrimRight(urlArg, "/"), "/mcp") // store base, no /mcp
+	r := loadRegistry()
+	r.Servers[name] = server{URL: u, Token: strings.TrimSpace(tok)}
+	if r.Active == "" {
+		r.Active = name
+	}
+	if err := saveRegistry(r); err != nil {
+		die(err)
+	}
+	star := ""
+	if r.Active == name {
+		star = "  (active)"
+	}
+	fmt.Printf("✓ added %s → %s%s\n", name, u, star)
+}
+
 // parseArgs parses a flagset while tolerating flags placed AFTER positionals
 // (Go's flag pkg stops at the first positional). Returns the positional args.
 func parseArgs(fs *flag.FlagSet, args []string) []string {
@@ -758,7 +911,7 @@ func usage() {
 sessions
   vault sessions [--project P] [--tag T] [--since YYYY-MM-DD] [--limit N]
   vault rebuild <project> <id>          re-summarize a session's refined face
-  vault rm-session <project> <id>       delete a session
+  vault rm-session <project> <id> [--yes]   delete a session
 
 docs (read)
   vault ls [folder]                     list docs
@@ -769,19 +922,22 @@ docs (read)
 docs (write)
   vault push <file> [--path P]          upload a local file as a doc
   vault write <path>                    write a doc from stdin
-  vault rm <path>                       delete a doc
-  vault mv <from> <to>                  move/rename a doc
+  vault rm <path> [--yes]               delete a doc
+  vault mv <from> <to> [--yes]          move/rename a doc
   vault cp <from> <to>                  copy a doc
 
 context sets
   vault contexts                        list context sets
   vault context <name> [--as source|refined|structured]   get/mount a context
-  vault context-create <name> [--face F] [--prompt P] --member path[:kind] ...
+  vault context-create <name> [--face F] [--prompt P] --member path[:kind[:on|off]] ...
   vault build <name> [--force] [--prompt P]   distill a context set (async)
   vault build-status <name>             check build progress
 
 local / meta
   vault sync [--resync] [--meta]        scan transcripts → vault
+  vault config                          show resolved config + registered vaults
+  vault config use <name>               switch active vault
+  vault config add <name> <url> <token> register a vault
   vault doctor                          config + reachability check
   vault version`)
 }
@@ -820,8 +976,12 @@ func main() {
 		cmdRebuild(pos[0], pos[1])
 
 	case "rm-session":
-		pos := parseArgs(flag.NewFlagSet("rm-session", flag.ExitOnError), rest)
-		need(pos, 2, "usage: vault rm-session <project> <id>")
+		fs := flag.NewFlagSet("rm-session", flag.ExitOnError)
+		yes := fs.Bool("yes", false, "skip confirmation")
+		fs.BoolVar(yes, "y", false, "skip confirmation")
+		pos := parseArgs(fs, rest)
+		need(pos, 2, "usage: vault rm-session <project> <id> [--yes]")
+		confirmOrDie(*yes, fmt.Sprintf("delete session %s/%s", pos[0], pos[1]))
 		cmdRmSession(pos[0], pos[1])
 
 	case "ls":
@@ -860,13 +1020,21 @@ func main() {
 		cmdWrite(pos[0])
 
 	case "rm":
-		pos := parseArgs(flag.NewFlagSet("rm", flag.ExitOnError), rest)
-		need(pos, 1, "usage: vault rm <path>")
+		fs := flag.NewFlagSet("rm", flag.ExitOnError)
+		yes := fs.Bool("yes", false, "skip confirmation")
+		fs.BoolVar(yes, "y", false, "skip confirmation")
+		pos := parseArgs(fs, rest)
+		need(pos, 1, "usage: vault rm <path> [--yes]")
+		confirmOrDie(*yes, "delete doc "+pos[0])
 		cmdMutate("delete_doc", pos[0], "")
 
 	case "mv":
-		pos := parseArgs(flag.NewFlagSet("mv", flag.ExitOnError), rest)
-		need(pos, 2, "usage: vault mv <from> <to>")
+		fs := flag.NewFlagSet("mv", flag.ExitOnError)
+		yes := fs.Bool("yes", false, "skip confirmation")
+		fs.BoolVar(yes, "y", false, "skip confirmation")
+		pos := parseArgs(fs, rest)
+		need(pos, 2, "usage: vault mv <from> <to> [--yes]")
+		confirmOrDie(*yes, fmt.Sprintf("move %s → %s", pos[0], pos[1]))
 		cmdMutate("move_doc", pos[0], pos[1])
 
 	case "cp":
@@ -916,6 +1084,25 @@ func main() {
 		meta := fs.Bool("meta", false, "also register session metadata (list_sessions)")
 		parseArgs(fs, rest)
 		cmdSync(*force, *meta)
+
+	case "config":
+		if len(rest) == 0 {
+			cmdConfig()
+			return
+		}
+		sub, subArgs := rest[0], rest[1:]
+		switch sub {
+		case "use":
+			pos := parseArgs(flag.NewFlagSet("config use", flag.ExitOnError), subArgs)
+			need(pos, 1, "usage: vault config use <name>")
+			cmdConfigUse(pos[0])
+		case "add":
+			pos := parseArgs(flag.NewFlagSet("config add", flag.ExitOnError), subArgs)
+			need(pos, 3, "usage: vault config add <name> <base-url> <token>")
+			cmdConfigAdd(pos[0], pos[1], pos[2])
+		default:
+			die(errors.New("usage: vault config [use <name> | add <name> <url> <token>]"))
+		}
 
 	case "doctor":
 		cmdDoctor()

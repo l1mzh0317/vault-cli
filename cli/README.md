@@ -65,19 +65,22 @@ vault cat <path> [--as source|refined]   read a doc
 # docs — write
 vault push <file> [--path P]          upload a local file as a doc
 vault write <path>                    write a doc from stdin
-vault rm <path>                       delete a doc
-vault mv <from> <to>                  move/rename a doc
+vault rm <path> [--yes]               delete a doc
+vault mv <from> <to> [--yes]          move/rename a doc
 vault cp <from> <to>                  copy a doc
 
 # context sets
 vault contexts                        list context sets
 vault context <name> [--as source|refined|structured]   get/mount a context
-vault context-create <name> [--face F] [--prompt P] --member path[:kind] ...
+vault context-create <name> [--face F] [--prompt P] --member path[:kind[:on|off]] ...
 vault build <name> [--force] [--prompt P]   distill a context set (async)
 vault build-status <name>             check build progress
 
 # local / meta
 vault sync [--resync] [--meta]        scan transcripts → vault
+vault config                          show resolved config + registered vaults
+vault config use <name>               switch active vault
+vault config add <name> <url> <token> register a vault
 vault doctor                          config + reachability check
 vault version
 ```
@@ -96,6 +99,14 @@ Notes:
   (or `~/.vault-session-meta-on`) also registers each session in `list_sessions`.
 - Doc paths **can't carry a file extension**; `push`'s default path strips it
   (`notes.md` → `docs/notes`).
+- **Destructive** commands (`rm`, `mv`, `rm-session`) prompt for confirmation on
+  a TTY and **refuse outright when non-interactive** (scripts/agents) unless you
+  pass `--yes`.
+- `context-create --member path[:kind[:on|off]]`: `kind` defaults to `doc`,
+  enabled defaults to `on`. `off` keeps a member in the set but excludes it when
+  the context is mounted.
+- `config` reads/writes the vault-manager registry (`~/.vault/servers.json`);
+  URLs are stored **base** (no `/mcp`).
 - Set `VAULT_DEBUG=1` to dump raw vault responses.
 
 ## Config
