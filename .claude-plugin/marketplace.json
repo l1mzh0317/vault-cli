@@ -1,13 +1,15 @@
 {
   "name": "vault-plugin",
   "description": "Vault — remote context store for Claude Code (MCP tools + multi-vault manager + session sync).",
-  "owner": { "name": "l1mzh0317" },
+  "owner": {
+    "name": "l1mzh0317"
+  },
   "plugins": [
     {
       "name": "vault",
       "source": "./",
       "description": "Remote document & context store for Claude — MCP tools, multi-vault manager, and automatic session sync.",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "license": "MIT"
     }
   ]

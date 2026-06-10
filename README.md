@@ -50,6 +50,34 @@ vault-manager add myvault https://your-vault.example.com <your-token>
 
 (Or `vault-manager import myvault` to adopt a `vault` entry already in `mcp.json`.)
 
+### Claude Code Desktop (or anywhere the plugin won't load)
+
+The **desktop app cannot install plugins from a custom marketplace** — the
+`/plugin marketplace add` step is CLI-only and the desktop skill loader is broken
+for custom-marketplace plugins ([anthropics/claude-code#39897](https://github.com/anthropics/claude-code/issues/39897),
+closed as not-planned). So on desktop, **don't install the plugin** — wire up the
+same three capabilities directly, via mechanisms the desktop app *does* support:
+
+```
+git clone https://github.com/l1mzh0317/vault-plugin
+cd vault-plugin
+./desktop-setup.sh https://your-vault.example.com <your-token>
+# or, if you already registered a vault with vault-manager, just:
+./desktop-setup.sh
+```
+
+This installs, with **no plugin system involved**:
+
+| Capability | Installed as | Works on desktop because |
+|---|---|---|
+| Vault **MCP tools** | user-scope `mcpServers` in `~/.claude.json` | desktop natively supports remote HTTP MCP |
+| **Skills** (`/vault-mcp`, `/vault-manager`) | personal skills in `~/.claude/skills/` | personal skills load on every surface |
+| **Session-sync hook** | `hooks` block in `~/.claude/settings.json` | desktop runs local shell hooks |
+
+Then **restart Claude Code**. Requires `python3` (the sync engine needs it too).
+Undo anytime with `./desktop-setup.sh --uninstall`. The URL is the **base** (no
+`/mcp` suffix — the script adds it).
+
 ### Changing config later (anytime)
 
 ```
