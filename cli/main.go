@@ -1038,8 +1038,10 @@ func need(pos []string, n int, msg string) {
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `vault — context store CLI   (global: --json for raw output)
+func usage() { usageTo(os.Stderr) }
+
+func usageTo(w io.Writer) {
+	fmt.Fprintln(w, `vault — context store CLI   (global: --json for raw output)
 
 sessions
   vault sessions [--project P] [--tag T] [--since YYYY-MM-DD] [--limit N]
@@ -1073,7 +1075,8 @@ local / meta
   vault config use <name>               switch active vault
   vault config add <name> <url> <token> register a vault
   vault doctor                          config + reachability check
-  vault version`)
+  vault version
+  vault help                            show this help`)
 }
 
 func main() {
@@ -1251,6 +1254,9 @@ func main() {
 
 	case "version", "-v", "--version":
 		fmt.Println("vault " + version)
+
+	case "help", "-h", "--help":
+		usageTo(os.Stdout) // explicit help → stdout, exit 0
 
 	default:
 		usage()
