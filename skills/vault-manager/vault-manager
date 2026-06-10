@@ -213,13 +213,32 @@ def _logging_on():
     return os.path.exists(FLAG)
 
 
+def _plugin_managed():
+    """True when the sync hook is wired by a native plugin install (its hooks
+    live in the plugin's hooks.json, not settings.json)."""
+    import glob
+    pdir = os.path.join(HOME, ".claude", "plugins")
+    for hj in glob.glob(os.path.join(pdir, "cache", "*", "*", "*",
+                                     "hooks", "hooks.json")):
+        try:
+            with open(hj, encoding="utf-8") as f:
+                if "session-log.sh" in f.read():
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 def _hooks_registered():
-    """(SessionStart, Stop) — whether the vault sync hook is wired in CC."""
+    """(SessionStart, Stop, source) — whether the vault sync hook is wired in CC.
+    source is 'plugin' (native plugin), 'settings' (manual), or None."""
+    if _plugin_managed():
+        return True, True, "plugin"
     try:
         with open(SETTINGS, encoding="utf-8") as f:
             h = json.load(f).get("hooks", {})
     except Exception:
-        return False, False
+        return False, False, None
 
     def has(event):
         for grp in h.get(event, []):
@@ -228,7 +247,7 @@ def _hooks_registered():
                 if "session-log" in cmd or "vault" in cmd:
                     return True
         return False
-    return has("SessionStart"), has("Stop")
+    return has("SessionStart"), has("Stop"), "settings"
 
 
 def _state_count():
@@ -270,9 +289,14 @@ def cmd_config(args):
     names = ", ".join((n + "*" if n == active else n) for n in reg["servers"]) or "(无)"
     print(f"  已注册        {len(reg['servers'])} 个: {names}")
     print(f"  自动同步      {'✅ 开' if _logging_on() else '⬜ 关'}   (~/.vault-logging-on)")
-    ss, st = _hooks_registered()
-    hk = ("✅ 已注册" if ss and st
-          else f"❌ 缺失 (SessionStart={'✓' if ss else '✗'} Stop={'✓' if st else '✗'}) → 跑 hooks/install.sh")
+    ss, st, src = _hooks_registered()
+    if src == "plugin":
+        hk = "✅ 插件接管 (plugin)"
+    elif ss and st:
+        hk = "✅ 已注册"
+    else:
+        hk = (f"❌ 缺失 (SessionStart={'✓' if ss else '✗'} Stop={'✓' if st else '✗'})"
+              " → 安装插件 vault@vault-plugin")
     print(f"  CC hooks      {hk}")
     print(f"  同步状态      {_state_count()} 条 transcript 已记录")
     print("─" * 48)

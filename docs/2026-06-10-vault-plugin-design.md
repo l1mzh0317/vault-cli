@@ -67,12 +67,14 @@ vault-manager add myvault https://your-vault.example.com <token>   # writes regi
 vault-manager config logging on                                    # opt into session sync
 ```
 
-## Known limitation
+## Plugin-managed hook detection (resolved in 1.0.1)
 
-`vault-manager config` reads `~/.claude/settings.json` to report "CC hooks
-✅/❌". Plugin hooks live outside settings.json, so plugin users may see a false
-`CC hooks ❌`. Cosmetic only — sync still works. Fix in a future vault-manager
-release (detect plugin-provided hooks).
+`vault-manager config` and `vault_sync.py doctor` originally reported "CC hooks
+✅/❌" by inspecting `~/.claude/settings.json`. Plugin hooks live outside that
+file, so plugin users saw a false `CC hooks ❌` / "总体 ❌". Fixed in 1.0.1: both
+now detect a native plugin install (a `hooks.json` under `~/.claude/plugins/`
+that wires `session-log.sh`, or `CLAUDE_PLUGIN_ROOT` in env) and report
+`✅ 插件接管 (plugin)`.
 
 ## Versioning
 

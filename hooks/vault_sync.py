@@ -286,12 +286,43 @@ def do_rebuild(token, selector=None):
 
 
 # ── doctor ───────────────────────────────────────────────────────────────────
+PLUGINS_DIR = os.path.join(HOME, ".claude", "plugins")
+
+
+def _plugin_managed():
+    """True when SessionStart/Stop are wired by a native plugin install (whose
+    hooks live in the plugin's hooks.json, NOT in settings.json)."""
+    # Running from inside a plugin install, or invoked by CC as a plugin hook.
+    try:
+        here = os.path.realpath(__file__)
+    except Exception:
+        here = ""
+    root = os.path.realpath(PLUGINS_DIR)
+    if here.startswith(root + os.sep) or os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return True
+    # Any installed plugin whose hooks.json wires our session-log.sh?
+    import glob
+    for hj in glob.glob(os.path.join(PLUGINS_DIR, "cache", "*", "*", "*",
+                                     "hooks", "hooks.json")):
+        try:
+            with open(hj, encoding="utf-8") as f:
+                if "session-log.sh" in f.read():
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 def hooks_registered():
+    # Native plugin wires SessionStart/Stop from its own hooks.json — Claude Code
+    # auto-loads them, so they never appear in settings.json. Treat as registered.
+    if _plugin_managed():
+        return {"source": "plugin", "settings": True, "start": True, "stop": True}
     try:
         with open(SETTINGS, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
-        return {"settings": False, "start": False, "stop": False}
+        return {"source": None, "settings": False, "start": False, "stop": False}
     hooks = cfg.get("hooks", {}) or {}
 
     def has(event):
@@ -302,7 +333,8 @@ def hooks_registered():
                     return True
         return False
 
-    return {"settings": True, "start": has("SessionStart"), "stop": has("Stop")}
+    return {"source": "settings", "settings": True,
+            "start": has("SessionStart"), "stop": has("Stop")}
 
 
 def doctor():
@@ -320,9 +352,13 @@ def doctor():
     print(f"  Vault 可达 ({VAULT_URL})")
     print(f"                                : {ok if token and vault_ping(token) else no}")
     print("  CC hooks 注册:")
-    print(f"    settings.json 存在          : {ok if reg['settings'] else no}")
-    print(f"    SessionStart hook           : {ok if reg['start'] else no + ' 缺失 → 跑 install.sh'}")
-    print(f"    Stop hook                   : {ok if reg['stop'] else no + ' 缺失 → 跑 install.sh'}")
+    if reg.get("source") == "plugin":
+        print(f"    插件接管 (plugin-managed)   : {ok}")
+    else:
+        hint = " 缺失 → 安装插件 vault@vault-plugin"
+        print(f"    settings.json 存在          : {ok if reg['settings'] else no}")
+        print(f"    SessionStart hook           : {ok if reg['start'] else no + hint}")
+        print(f"    Stop hook                   : {ok if reg['stop'] else no + hint}")
     print(f"  已记录 transcript             : {len(state)} 个")
     # transcript count on disk
     disk = sum(1 for _ in iter_transcripts())

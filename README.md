@@ -70,14 +70,6 @@ Health-check the sync at any time:
 "${CLAUDE_PLUGIN_ROOT}"/hooks/session-log.sh doctor
 ```
 
-## Known limitation
-
-`vault-manager config` detects whether the sync hook is wired by inspecting
-`~/.claude/settings.json`. Native plugins register hooks **outside** that file
-(Claude Code wires them automatically from `hooks/hooks.json`), so the dashboard
-may show **`CC hooks ❌`** even though the hook is active. The sync still works —
-this is a cosmetic mismatch to be fixed in a future release.
-
 ## Components
 
 | Path | What it is |
