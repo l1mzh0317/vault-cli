@@ -22,6 +22,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: cli/go.mod
+          cache: false   # zero deps, no go.sum — skip the cache step
 
       - name: Cross-compile static binaries
         working-directory: cli
