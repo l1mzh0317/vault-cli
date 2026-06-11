@@ -20,7 +20,9 @@ case "$arch" in
 esac
 case "$os" in
   linux | darwin) ;;
-  *) echo "✗ unsupported OS: $os — on Windows download vault-windows-amd64.exe from Releases" >&2; exit 1 ;;
+  *) echo "✗ this script is for Linux/macOS. On Windows use PowerShell:" >&2
+     echo "    irm https://raw.githubusercontent.com/${REPO}/main/cli/install.ps1 | iex" >&2
+     exit 1 ;;
 esac
 
 asset="vault-${os}-${arch}"

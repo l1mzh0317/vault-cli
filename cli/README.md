@@ -21,16 +21,25 @@ static binary any agent/harness can call over a shell (CC, Codex, desktop, cron)
 
 ## Install (no Go needed)
 
-```
+**Linux / macOS:**
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.sh | sh
 ```
 
-Downloads the right static binary from the latest release into `~/.local/bin`
-(override with `INSTALL_DIR=…`) **and** installs a markdown `vault` skill to
-`~/.claude/skills/vault/` so Claude knows the CLI exists (set `NO_SKILL=1` to
-skip; restart Claude Code to load `/vault`). Windows: grab
-`vault-windows-amd64.exe` from the
-[Releases](https://github.com/l1mzh0317/vault-cli/releases) page.
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.ps1 | iex
+```
+
+Both download the right static binary for your OS/arch from the latest release
+(into `~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\vault` on Windows; override
+with `INSTALL_DIR`) **and** install a markdown `vault` skill to
+`~/.claude/skills/vault/` so Claude knows the CLI exists (`NO_SKILL=1` to skip;
+restart Claude Code to load `/vault`). Prebuilt binaries: macOS / Linux / Windows
+× amd64 / arm64 on the [Releases](https://github.com/l1mzh0317/vault-cli/releases)
+page.
 
 ## Build from source
 

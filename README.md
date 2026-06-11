@@ -30,11 +30,23 @@ context (token-free writes), and self-updates.
 
 ### 1. CLI  ⭐ recommended
 
+Install the binary (Linux/macOS use `sh`; Windows has `curl` but no POSIX shell,
+so use PowerShell — `irm` is its `curl`):
+
 ```sh
+# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.ps1 | iex
+```
+
+Then point it at your vault and wire Claude Code (same on every OS):
+
+```sh
 vault config add myvault https://your-vault.example.com <token>
-vault setup            # wire Claude Code: MCP server + auto-sync hooks
-# then restart Claude Code
+vault setup            # MCP server + auto-sync hooks; then restart Claude Code
 ```
 
 Installs a single static binary **plus** a `vault` skill (so Claude knows the CLI
