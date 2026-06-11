@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -39,9 +40,13 @@ import (
 var version = "0.1.0-dev"
 
 const (
-	maxBody    = 100_000 // chars; matches python MAX_BODY
-	defaultURL = "https://longku-vault.zeabur.app"
+	maxBody = 100_000 // chars; matches python MAX_BODY
+	// ghRepo is THIS tool's own source repo, used for self-update. It is NOT a
+	// vault — no vault URL/token is baked into the binary.
+	ghRepo = "l1mzh0317/vault-plugin"
 )
+
+var errNoVault = errors.New("no vault configured — run `vault config add <name> <url> <token>` (or set VAULT_URL / VAULT_TOKEN)")
 
 var (
 	httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -76,10 +81,7 @@ func baseURL() string {
 	if u == "" {
 		u = registryActive().URL
 	}
-	if u == "" {
-		u = defaultURL
-	}
-	return strings.TrimRight(u, "/")
+	return strings.TrimRight(u, "/") // "" if nothing configured — no baked-in default
 }
 
 func token() string {
@@ -107,6 +109,9 @@ func quotePath(p string) string {
 }
 
 func vaultPut(path, body string) error {
+	if baseURL() == "" {
+		return errNoVault
+	}
 	req, _ := http.NewRequest(http.MethodPut,
 		baseURL()+"/source/"+quotePath(path), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token())
@@ -135,6 +140,9 @@ func vaultPing() bool {
 // vaultCallTool invokes an MCP tool over JSON-RPC. Content stays in this
 // process (read from disk) — it never goes through the model.
 func vaultCallTool(name string, args map[string]any) (map[string]any, error) {
+	if baseURL() == "" {
+		return nil, errNoVault
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": name, "arguments": args},
@@ -677,7 +685,7 @@ func cmdDoctor() {
 	tok := token()
 	fmt.Println("vault CLI · health check")
 	fmt.Println(strings.Repeat("-", 32))
-	fmt.Printf("  base url      : %s\n", baseURL())
+	fmt.Printf("  base url      : %s\n", or(baseURL(), "(not configured)"))
 	tokStat := no
 	if tok != "" {
 		tokStat = ok
@@ -1017,6 +1025,90 @@ func cmdSetup(uninstall, noHook, noMCP bool) {
 	fmt.Println("Restart Claude Code to apply.")
 }
 
+// ── self-update ──────────────────────────────────────────────────────────────
+func httpGet(u string) ([]byte, error) {
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GET %s -> HTTP %d", u, resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func latestTag() (string, error) {
+	b, err := httpGet("https://api.github.com/repos/" + ghRepo + "/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	var d struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(b, &d); err != nil {
+		return "", err
+	}
+	if d.TagName == "" {
+		return "", errors.New("no release found")
+	}
+	return d.TagName, nil
+}
+
+func refreshSkill() {
+	b, err := httpGet("https://raw.githubusercontent.com/" + ghRepo + "/main/cli/skill/SKILL.md")
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home(), ".claude", "skills", "vault")
+	if os.MkdirAll(dir, 0o755) == nil && os.WriteFile(filepath.Join(dir, "SKILL.md"), b, 0o644) == nil {
+		fmt.Println("  ✓ skill refreshed")
+	}
+}
+
+func cmdUpdate(checkOnly bool) {
+	tag, err := latestTag()
+	if err != nil {
+		die(err)
+	}
+	latest := strings.TrimPrefix(tag, "cli-v")
+	fmt.Printf("current %s · latest %s\n", version, latest)
+	if latest == version {
+		fmt.Println("already up to date ✓")
+		return
+	}
+	if checkOnly {
+		fmt.Println("update available → run `vault update`")
+		return
+	}
+	asset := "vault-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		asset += ".exe"
+	}
+	bin, err := httpGet("https://github.com/" + ghRepo + "/releases/download/" + tag + "/" + asset)
+	if err != nil {
+		die(fmt.Errorf("download %s: %w", asset, err))
+	}
+	self, err := os.Executable()
+	if err != nil {
+		die(err)
+	}
+	if rp, err := filepath.EvalSymlinks(self); err == nil {
+		self = rp
+	}
+	tmp := self + ".new"
+	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
+		die(err)
+	}
+	if err := os.Rename(tmp, self); err != nil { // replaces a running binary on Unix
+		os.Remove(tmp)
+		die(fmt.Errorf("replace %s: %w (on Windows, close vault and rename %s by hand)", self, err, tmp))
+	}
+	fmt.Printf("✓ updated %s → %s\n", version, latest)
+	refreshSkill()
+}
+
 // parseArgs parses a flagset while tolerating flags placed AFTER positionals
 // (Go's flag pkg stops at the first positional). Returns the positional args.
 func parseArgs(fs *flag.FlagSet, args []string) []string {
@@ -1074,6 +1166,7 @@ local / meta
   vault config                          show resolved config + registered vaults
   vault config use <name>               switch active vault
   vault config add <name> <url> <token> register a vault
+  vault update [--check]                self-update to the latest release
   vault doctor                          config + reachability check
   vault version
   vault help                            show this help`)
@@ -1248,6 +1341,12 @@ func main() {
 		noMCP := fs.Bool("no-mcp", false, "skip the MCP server")
 		parseArgs(fs, rest)
 		cmdSetup(*un, *noHook, *noMCP)
+
+	case "update":
+		fs := flag.NewFlagSet("update", flag.ExitOnError)
+		check := fs.Bool("check", false, "only check for a newer version, don't install")
+		parseArgs(fs, rest)
+		cmdUpdate(*check)
 
 	case "doctor":
 		cmdDoctor()
