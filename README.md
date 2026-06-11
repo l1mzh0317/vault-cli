@@ -1,143 +1,137 @@
-# Vault — Claude Code Plugin
+# Vault — remote context store for Claude
 
-A remote document & context store for Claude Code, packaged as a native plugin. Bundles:
+A remote document & context store for Claude — **sessions, docs, and distilled
+context that persist across sessions and machines** instead of vanishing when a
+conversation ends. There are three ways to use it:
 
-- **`vault-mcp` skill** — work with vault docs, sessions, and context sets (上下文集)
-- **`vault-manager` skill** — register / switch between vault servers; one-screen config dashboard
-- **Session-sync hook** — auto-archive each conversation transcript to your vault (opt-in)
+- **`vault` CLI** ⭐ *recommended* — one static binary (no runtime). Reads, writes,
+  and wires Claude Code for you. Works on the CLI, the **Desktop app**, cron, or
+  any harness.
+- **MCP server** — the vault's tools inside any MCP-capable client (auto-discovered
+  by the model).
+- **Claude Code plugin** — bundles the MCP server + skills + session-sync hook
+  (Claude Code **CLI only**).
 
-> The vault **server** (the thing this client talks to) is a separate
-> self-hosted service. This plugin is the **client** side — you bring your own
-> vault URL + token.
+> The vault **server** (the thing the client talks to) is a separate self-hosted
+> service. Everything here is the **client** side — bring your own vault URL + token.
 
-## Configuration model — two layers
+## Install — pick one
 
-The plugin works for both casual and multi-vault users via Claude Code's MCP
-precedence (`local > project > **user** > **plugin** > claude.ai`):
+| | Best for | Install | Needs |
+|---|---|---|---|
+| **CLI** ⭐ | everything; Desktop; token-free writes; self-update | `curl … cli/install.sh \| sh` | nothing (static binary) |
+| **MCP** | reads inside a model; any MCP client | `claude mcp add …` | an MCP client |
+| **Plugin** | CLI users who want it bundled | `/plugin marketplace add …` | Claude Code **CLI** (not Desktop) |
 
-1. **Plugin layer (`userConfig`)** — the plugin ships its own `.mcp.json` whose
-   `vault` server reads `userConfig` values. On enable, Claude Code prompts for
-   your **Vault URL** (defaults to the public instance) and **token** (stored in
-   the system keychain). This makes the MCP server work **right after install** —
-   no extra setup.
-2. **User layer (`vault-manager`)** — for multiple vaults, the bundled
-   `vault-manager` skill writes a **user-scope** `vault` entry into
-   `~/.claude/mcp.json` plus a registry at `~/.vault/servers.json`. User scope
-   **overrides** the plugin layer, so `vault-manager use <name>` switches the
-   active vault at runtime (the session-sync hook follows instantly; MCP tools
-   reconnect on the next restart).
+**We recommend the CLI.** It's the only one that works everywhere — including the
+**Desktop app, where the plugin can't load** ([anthropics/claude-code#39897](https://github.com/anthropics/claude-code/issues/39897),
+closed not-planned) — needs no python, keeps large uploads out of the model's
+context (token-free writes), and self-updates.
 
-Single vault → just fill the install prompt. Many vaults → use `vault-manager`
-and leave the install token blank (the user-scope entry wins).
+### 1. CLI  ⭐ recommended
 
-## Install
+```sh
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
+vault config add myvault https://your-vault.example.com <token>
+vault setup            # wire Claude Code: MCP server + auto-sync hooks
+# then restart Claude Code
+```
+
+Installs a single static binary **plus** a `vault` skill (so Claude knows the CLI
+exists) — no python, no plugin system, works on **Desktop** too. Later:
+`vault update` to upgrade, `vault setup --uninstall` to undo. Full command set in
+[`cli/README.md`](cli/README.md).
+
+One-step desktop install (binary + register + wire, all in one):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/desktop-setup.sh \
+  | sh -s -- https://your-vault.example.com <token>
+```
+
+### 2. MCP server only
+
+Just want the vault's tools inside a model — no CLI, no plugin:
+
+```sh
+claude mcp add vault --scope user --transport http \
+  https://your-vault.example.com/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Works in any MCP client (Claude Code CLI **and** Desktop). Best for **reads** —
+for bulk **writes/sync** prefer the CLI, since MCP passes content *by value*
+(it goes through the model's context = token cost).
+
+### 3. Claude Code plugin (CLI only)
 
 ```
 /plugin marketplace add l1mzh0317/vault-plugin
 /plugin install vault@vault-plugin
 ```
 
-On enable you'll be prompted for your **Vault URL** + **token** — fill them and
-**restart Claude Code**, then `/mcp` shows the `vault` server connected. That's the
-whole setup for a single vault.
+Bundles the MCP server + skills + an opt-in session-sync hook. On enable you're
+prompted for your **Vault URL** + **token** — fill them and **restart**. For
+multiple vaults, leave the token blank and use the `vault-manager` skill (its
+user-scope config overrides the plugin layer).
 
-**Multiple vaults instead?** Leave the token prompt blank and register vaults with
-the manager (its user-scope config takes precedence):
+> **The Desktop app can't install plugins from a custom marketplace** — the
+> marketplace step is CLI-only and the desktop skill loader is broken for them.
+> Use the **CLI** on Desktop.
 
-```
-vault-manager add myvault https://your-vault.example.com <your-token>
-```
+## Configuring & switching vaults
 
-(Or `vault-manager import myvault` to adopt a `vault` entry already in `mcp.json`.)
+```sh
+# CLI
+vault config                       # dashboard: active vault, token, flags, state
+vault config add <name> <url> <token>
+vault config use <name>            # switch active vault
 
-### Claude Code Desktop (or anywhere the plugin won't load)
-
-The **desktop app cannot install plugins from a custom marketplace** — the
-`/plugin marketplace add` step is CLI-only and the desktop skill loader is broken
-for custom-marketplace plugins ([anthropics/claude-code#39897](https://github.com/anthropics/claude-code/issues/39897),
-closed as not-planned). So on desktop, **don't install the plugin** — use the
-`vault` CLI instead. One static binary, **no python, no plugin system**:
-
-```
-curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/desktop-setup.sh \
-  | sh -s -- https://your-vault.example.com <your-token>
+# plugin
+vault-manager add <name> <url> <token>
+vault-manager use <name>           # switch (hook follows instantly; restart CC for MCP)
+vault-manager config               # one-screen dashboard
 ```
 
-This installs the binary, registers your vault, and wires Claude Code — then
-**restart**. It does, entirely in Go + sh:
+Both share the registry at `~/.vault/servers.json`. URLs are stored **base** (no
+`/mcp`); each consumer appends the right suffix.
 
-| Step | What | Works on desktop because |
-|---|---|---|
-| install binary | `vault` → `~/.local/bin` | single static binary, no runtime |
-| MCP server | user-scope `mcpServers` in `~/.claude.json` | desktop natively supports remote HTTP MCP |
-| auto-sync hooks | `hooks` in `~/.claude/settings.json` → `vault sync` | desktop runs local shell hooks |
+## Automatic session sync
 
-Already registered a vault? Drop the url/token — it reads `~/.vault`. Undo with
-`./desktop-setup.sh --uninstall`. The URL is the **base** (no `/mcp` — it's added
-for you). See [`cli/README.md`](cli/README.md) for the full command set.
+Every conversation transcript can be auto-archived to your vault on session
+start/stop — content is read **locally** and pushed straight to the vault, so it
+never passes through the model's context.
 
-**Just the binary + integration, manually:**
+- **CLI:** `vault setup` wires `SessionStart`/`Stop` hooks → `vault sync`. Add
+  `touch ~/.vault-session-meta-on` to also index each session in `list_sessions`.
+- **Plugin:** ships the hooks; gate them with `vault-manager config logging on`
+  (or `touch ~/.vault-logging-on`).
 
-```
-curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
-vault config add myvault https://your-vault.example.com <token>
-vault setup        # wire MCP + auto-sync hooks  (vault setup --uninstall to undo)
-```
-
-Slash-command skills (`/vault-mcp` etc.) are optional and not installed by this
-path — the CLI + MCP server cover the functionality.
-
-### Changing config later (anytime)
-
-```
-vault-manager add <name> <url> <token>   # register another vault
-vault-manager use <name>                  # switch active vault (hook follows instantly; restart CC for MCP tools)
-vault-manager current                     # show active vault
-vault-manager ping all                    # health-check all
-vault-manager config                      # one-screen dashboard of every local setting
-```
-
-## Automatic session sync (opt-in)
-
-The plugin registers `SessionStart` + `Stop` hooks, but they upload **only** when
-a flag file exists — so **nothing syncs until you turn it on**:
-
-```
-vault-manager config logging on     # or: touch ~/.vault-logging-on
-vault-manager config logging off    # or: rm ~/.vault-logging-on
-```
-
-The hook reads the active vault's URL + token straight from the registry, so it
-always syncs to whichever vault is active.
-
-Health-check the sync at any time:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}"/hooks/session-log.sh doctor
-```
+Health-check anytime: `vault doctor`.
 
 ## Components
 
 | Path | What it is |
 |---|---|
+| `cli/` | The **`vault` CLI** (Go, single static binary) — recommended front-end |
+| `cli/install.sh` | One-line installer (binary + skill), used by the `curl … \| sh` flow |
+| `cli/skill/SKILL.md` | The `vault` skill, installed to `~/.claude/skills/vault/` |
+| `desktop-setup.sh` | Python-free desktop install: binary + `vault setup` |
 | `.claude-plugin/plugin.json` | Plugin manifest (+ `userConfig` for Vault URL/token) |
 | `.claude-plugin/marketplace.json` | Marketplace catalog (self-hosted in this repo) |
-| `.mcp.json` | The `vault` MCP server, wired to `userConfig` values |
-| `skills/vault-mcp/` | Skill for working with vault docs/sessions/context sets |
-| `skills/vault-manager/` | Skill + script for multi-vault config (the registry; overrides the plugin layer) |
-| `skills/plugin-update/` | Skill to manually update the plugin to the latest published version |
-| `hooks/hooks.json` | Declares the SessionStart/Stop sync hooks |
-| `hooks/session-log.sh` + `hooks/vault_sync.py` | The sync engine (pure stdlib) |
+| `.mcp.json` | The plugin's `vault` MCP server, wired to `userConfig` |
+| `skills/vault-mcp/`, `skills/vault-manager/`, `skills/plugin-update/` | Plugin-bundled skills |
+| `hooks/` | Plugin session-sync hook (`session-log.sh` + `vault_sync.py`, pure stdlib) |
 
-## Updating the plugin
+## Updating
 
-```
-/vault:plugin-update     # or just ask: "update the vault plugin"
+```sh
+vault update                 # CLI: self-update to the latest release (--check to peek)
+/vault:plugin-update         # plugin: update vault@vault-plugin to the latest version
 ```
 
-Refreshes the marketplace and updates `vault@vault-plugin` to the latest published
-version (then restart Claude Code). Updates land only when the author bumps the
-version in `plugin.json`.
+CLI releases are published from `cli-v*` tags (cross-compiled for macOS / Linux /
+Windows); `install.sh` and `vault update` always fetch the latest.
 
 ## License
 
