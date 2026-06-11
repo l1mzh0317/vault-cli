@@ -22,7 +22,7 @@ This skill ships inside the **`vault` plugin** — install it once and both skil
 (`vault-mcp`, `vault-manager`) plus the session-sync hook come together:
 
 ```
-/plugin marketplace add l1mzh0317/vault-plugin
+/plugin marketplace add l1mzh0317/vault-cli
 /plugin install vault@vault-plugin
 ```
 

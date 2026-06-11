@@ -43,7 +43,7 @@ const (
 	maxBody = 100_000 // chars; matches python MAX_BODY
 	// ghRepo is THIS tool's own source repo, used for self-update. It is NOT a
 	// vault — no vault URL/token is baked into the binary.
-	ghRepo = "l1mzh0317/vault-plugin"
+	ghRepo = "l1mzh0317/vault-cli"
 )
 
 var errNoVault = errors.New("no vault configured — run `vault config add <name> <url> <token>` (or set VAULT_URL / VAULT_TOKEN)")

@@ -8,7 +8,7 @@
 # no runtime) and wires Claude Code to it. Everything below is Go + sh — no
 # python, no plugin system.
 #
-#   curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/desktop-setup.sh | sh -s -- <base-url> <token>
+#   curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/desktop-setup.sh | sh -s -- <base-url> <token>
 #   ./desktop-setup.sh                 # use the vault already in ~/.vault registry
 #   ./desktop-setup.sh --uninstall     # remove the CC integration (keeps binary)
 #
@@ -18,7 +18,7 @@
 #   3. auto-sync hooks             → ~/.claude/settings.json (`vault sync`)
 set -eu
 
-REPO="l1mzh0317/vault-plugin"
+REPO="l1mzh0317/vault-cli"
 DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VAULT="$DIR/vault"
 

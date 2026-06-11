@@ -22,7 +22,7 @@ static binary any agent/harness can call over a shell (CC, Codex, desktop, cron)
 ## Install (no Go needed)
 
 ```
-curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.sh | sh
 ```
 
 Downloads the right static binary from the latest release into `~/.local/bin`
@@ -30,7 +30,7 @@ Downloads the right static binary from the latest release into `~/.local/bin`
 `~/.claude/skills/vault/` so Claude knows the CLI exists (set `NO_SKILL=1` to
 skip; restart Claude Code to load `/vault`). Windows: grab
 `vault-windows-amd64.exe` from the
-[Releases](https://github.com/l1mzh0317/vault-plugin/releases) page.
+[Releases](https://github.com/l1mzh0317/vault-cli/releases) page.
 
 ## Build from source
 
@@ -44,7 +44,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o vault-darwin
 Or, with Go installed:
 
 ```
-go install github.com/l1mzh0317/vault-plugin/cli@latest   # installs as `cli`
+go install github.com/l1mzh0317/vault-cli/cli@latest   # installs as `cli`
 ```
 
 (Rename the binary to `vault` and put it on your `PATH`.)

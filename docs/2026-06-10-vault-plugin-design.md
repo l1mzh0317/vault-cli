@@ -10,7 +10,7 @@ native Claude Code plugin, distributed from a public GitHub repo so anyone can
 | # | Decision | Choice |
 |---|---|---|
 | 1 | Packaging granularity | **Single bundled plugin** (`vault`) containing both skills + the hook |
-| 2 | Where it lives | **New public repo `l1mzh0317/vault-plugin`** (the `vault` server repo is private; marketplace must be public) |
+| 2 | Where it lives | **New public repo `l1mzh0317/vault-cli`** (the `vault` server repo is private; marketplace must be public) |
 | 3 | Config source of truth | **`vault-manager` registry** (`~/.vault/servers.json`) — changeable at runtime, NOT plugin `userConfig` or env vars |
 | 4 | Session logging default | **Off** (opt-in via flag file) |
 
@@ -60,7 +60,7 @@ referenced it was stripped from `session-log.sh`).
 ## Install / use flow
 
 ```
-/plugin marketplace add l1mzh0317/vault-plugin
+/plugin marketplace add l1mzh0317/vault-cli
 /plugin install vault@vault-plugin
 vault-manager add myvault https://your-vault.example.com <token>   # writes registry + mcp.json + .vault-token
 # restart Claude Code → /mcp shows vault connected

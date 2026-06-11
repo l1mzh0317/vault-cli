@@ -31,7 +31,7 @@ context (token-free writes), and self-updates.
 ### 1. CLI  ⭐ recommended
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.sh | sh
 vault config add myvault https://your-vault.example.com <token>
 vault setup            # wire Claude Code: MCP server + auto-sync hooks
 # then restart Claude Code
@@ -45,7 +45,7 @@ exists) — no python, no plugin system, works on **Desktop** too. Later:
 One-step desktop install (binary + register + wire, all in one):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/desktop-setup.sh \
+curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/desktop-setup.sh \
   | sh -s -- https://your-vault.example.com <token>
 ```
 
@@ -66,7 +66,7 @@ for bulk **writes/sync** prefer the CLI, since MCP passes content *by value*
 ### 3. Claude Code plugin (CLI only)
 
 ```
-/plugin marketplace add l1mzh0317/vault-plugin
+/plugin marketplace add l1mzh0317/vault-cli
 /plugin install vault@vault-plugin
 ```
 

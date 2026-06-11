@@ -13,7 +13,7 @@ description: >-
 # Vault Plugin — manual self-update
 
 Pull the latest **published** version of the `vault` plugin from its marketplace
-(`l1mzh0317/vault-plugin`) and update the local install. Use this when auto-update
+(`l1mzh0317/vault-cli`) and update the local install. Use this when auto-update
 is off or the user wants to force a refresh now.
 
 This only changes the plugin's **version**. It does not touch the vault registry,

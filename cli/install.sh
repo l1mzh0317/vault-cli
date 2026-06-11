@@ -1,14 +1,14 @@
 #!/bin/sh
 # Install the `vault` CLI from GitHub Releases — no Go, no runtime.
 #
-#   curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-plugin/main/cli/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/l1mzh0317/vault-cli/main/cli/install.sh | sh
 #
 # Env overrides:
 #   INSTALL_DIR=/usr/local/bin   where to put the binary (default ~/.local/bin)
 #   VERSION=cli-v0.1.0           a specific release tag (default: latest)
 set -eu
 
-REPO="l1mzh0317/vault-plugin"
+REPO="l1mzh0317/vault-cli"
 DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
