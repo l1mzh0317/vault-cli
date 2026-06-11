@@ -20,6 +20,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -38,6 +39,12 @@ import (
 
 // version is overridden at build time via -ldflags "-X main.version=…".
 var version = "0.1.0-dev"
+
+// skillMD is the `vault` skill, embedded so `vault setup` / `vault skill` can
+// install it offline — no install.sh required, always matching this binary.
+//
+//go:embed skill/SKILL.md
+var skillMD string
 
 const (
 	maxBody = 100_000 // chars; matches python MAX_BODY
@@ -702,6 +709,36 @@ func cmdDoctor() {
 	}
 	fmt.Printf("  transcripts   : %d on disk (%s)\n", len(iterTranscripts()), dir)
 	fmt.Printf("  synced state  : %d tracked\n", len(loadState()))
+	warnStaleRefs()
+}
+
+// warnStaleRefs flags (does NOT edit) references to the old python hook in the
+// user's CLAUDE.md files, so they can clean them up by hand. Editing a user's
+// CLAUDE.md automatically would be invasive, so this only warns.
+func warnStaleRefs() {
+	stale := []string{"session-log.sh", "vault_sync.py"}
+	files := []string{
+		filepath.Join(home(), ".claude", "CLAUDE.md"),
+		filepath.Join(home(), "CLAUDE.md"),
+	}
+	var hits []string
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, s := range stale {
+			if strings.Contains(string(b), s) {
+				hits = append(hits, fmt.Sprintf("%s mentions %q", f, s))
+			}
+		}
+	}
+	if len(hits) > 0 {
+		fmt.Println("  stale notes   : ⚠ old python-hook references found — consider removing:")
+		for _, h := range hits {
+			fmt.Println("                    - " + h)
+		}
+	}
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -965,62 +1002,145 @@ func quoteCmd(p string) string {
 	return p
 }
 
-func cmdSetup(uninstall, noHook, noMCP bool) {
-	cj := filepath.Join(home(), ".claude.json")
-	settings := filepath.Join(home(), ".claude", "settings.json")
+var (
+	claudeJSON   = func() string { return filepath.Join(home(), ".claude.json") }
+	settingsJSON = func() string { return filepath.Join(home(), ".claude", "settings.json") }
+	skillPath    = func() string { return filepath.Join(home(), ".claude", "skills", "vault", "SKILL.md") }
+)
 
-	if uninstall {
-		d := loadJSONFile(cj)
-		if ms, ok := d["mcpServers"].(map[string]any); ok {
-			delete(ms, "vault")
-			_ = saveJSONFile(cj, d)
-		}
-		s := loadJSONFile(settings)
-		if hooks, ok := s["hooks"].(map[string]any); ok {
-			dropVaultHooks(hooks, "SessionStart")
-			dropVaultHooks(hooks, "Stop")
-			_ = saveJSONFile(settings, s)
-		}
-		fmt.Println("✓ removed vault MCP server + sync hooks (binary + registry kept)")
-		return
-	}
-
+// ── individual setup steps (each idempotent) ─────────────────────────────────
+func setupMCP() error {
 	if token() == "" {
-		die(errors.New("no vault token — run `vault config add <name> <url> <token>` first"))
+		return errors.New("no vault token — run `vault config add <name> <url> <token>` first")
 	}
+	d := loadJSONFile(claudeJSON())
+	ms, _ := d["mcpServers"].(map[string]any)
+	if ms == nil {
+		ms = map[string]any{}
+	}
+	ms["vault"] = map[string]any{"type": "http", "url": baseURL() + "/mcp",
+		"headers": map[string]any{"Authorization": "Bearer " + token()}}
+	d["mcpServers"] = ms
+	return saveJSONFile(claudeJSON(), d)
+}
+
+func setupHooks() error {
 	self, err := os.Executable()
 	if err != nil {
 		self = "vault"
 	}
-
-	if !noMCP {
-		d := loadJSONFile(cj)
-		ms, _ := d["mcpServers"].(map[string]any)
-		if ms == nil {
-			ms = map[string]any{}
-		}
-		ms["vault"] = map[string]any{"type": "http", "url": baseURL() + "/mcp",
-			"headers": map[string]any{"Authorization": "Bearer " + token()}}
-		d["mcpServers"] = ms
-		if err := saveJSONFile(cj, d); err != nil {
-			die(err)
-		}
-		fmt.Printf("  ✓ MCP server 'vault' → %s\n", cj)
+	d := loadJSONFile(settingsJSON())
+	hooks, _ := d["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
 	}
-	if !noHook {
-		s := loadJSONFile(settings)
-		hooks, _ := s["hooks"].(map[string]any)
-		if hooks == nil {
-			hooks = map[string]any{}
+	cmd := quoteCmd(self) + " sync"
+	setHook(hooks, "SessionStart", cmd)
+	setHook(hooks, "Stop", cmd)
+	d["hooks"] = hooks
+	return saveJSONFile(settingsJSON(), d)
+}
+
+func installSkill() error {
+	if err := os.MkdirAll(filepath.Dir(skillPath()), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(skillPath(), []byte(skillMD), 0o644)
+}
+
+func uninstallSkill() error {
+	return os.RemoveAll(filepath.Dir(skillPath()))
+}
+
+// ── interactive checklist (stdlib only, line-based) ──────────────────────────
+type setupStep struct {
+	label, detail string
+	on            bool
+	apply         func() error
+}
+
+func isInteractive() bool {
+	fi, _ := os.Stdin.Stat()
+	return fi != nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// chooseSteps shows the checklist and lets the user toggle by number. Returns
+// false if the user aborts.
+func chooseSteps(steps []*setupStep) bool {
+	r := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Println("\nvault setup will apply:")
+		for i, s := range steps {
+			mark := " "
+			if s.on {
+				mark = "x"
+			}
+			fmt.Printf("  [%s] %d. %-22s %s\n", mark, i+1, s.label, s.detail)
 		}
-		cmd := quoteCmd(self) + " sync"
-		setHook(hooks, "SessionStart", cmd)
-		setHook(hooks, "Stop", cmd)
-		s["hooks"] = hooks
-		if err := saveJSONFile(settings, s); err != nil {
+		fmt.Print("Proceed? [Y/n], or numbers to toggle (e.g. \"1 3\"): ")
+		line, _ := r.ReadString('\n')
+		line = strings.TrimSpace(line)
+		switch strings.ToLower(line) {
+		case "", "y", "yes":
+			return true
+		case "n", "no", "q":
+			return false
+		}
+		for _, tok := range strings.Fields(line) {
+			var n int
+			if _, err := fmt.Sscanf(tok, "%d", &n); err == nil && n >= 1 && n <= len(steps) {
+				steps[n-1].on = !steps[n-1].on
+			}
+		}
+	}
+}
+
+func cmdSetup(uninstall, noHook, noMCP, noSkill, yes bool) {
+	if uninstall {
+		d := loadJSONFile(claudeJSON())
+		if ms, ok := d["mcpServers"].(map[string]any); ok {
+			delete(ms, "vault")
+			_ = saveJSONFile(claudeJSON(), d)
+		}
+		s := loadJSONFile(settingsJSON())
+		if hooks, ok := s["hooks"].(map[string]any); ok {
+			dropVaultHooks(hooks, "SessionStart")
+			dropVaultHooks(hooks, "Stop")
+			_ = saveJSONFile(settingsJSON(), s)
+		}
+		_ = uninstallSkill()
+		fmt.Println("✓ removed vault MCP server + sync hooks + skill (binary + registry kept)")
+		return
+	}
+
+	steps := []*setupStep{
+		{"MCP server", "→ ~/.claude.json (reads inside a model)", !noMCP, setupMCP},
+		{"auto-sync hooks", "→ settings.json (SessionStart/Stop: vault sync)", !noHook, setupHooks},
+		{"vault skill", "→ ~/.claude/skills/vault (so Claude knows the CLI)", !noSkill, installSkill},
+	}
+
+	// Interactive checklist for humans; agents / pipes / --yes skip it.
+	if isInteractive() && !yes {
+		if !chooseSteps(steps) {
+			fmt.Println("aborted — nothing changed")
+			return
+		}
+	}
+
+	applied := 0
+	for _, s := range steps {
+		if !s.on {
+			continue
+		}
+		if err := s.apply(); err != nil {
 			die(err)
 		}
-		fmt.Printf("  ✓ sync hooks (SessionStart+Stop → %s) → %s\n", cmd, settings)
+		fmt.Printf("  ✓ %s %s\n", s.label, s.detail)
+		applied++
+	}
+	if applied == 0 {
+		fmt.Println("nothing selected")
+		return
 	}
 	fmt.Println("Restart Claude Code to apply.")
 }
@@ -1167,7 +1287,8 @@ context sets
 
 local / meta
   vault sync [--resync] [--meta]        scan transcripts → vault
-  vault setup [--uninstall] [--no-hook] [--no-mcp]   wire Claude Code (MCP + auto-sync hooks)
+  vault setup [--uninstall] [-y] [--no-hook] [--no-mcp] [--no-skill]   wire Claude Code (interactive)
+  vault skill [--uninstall]             install the bundled /vault skill
   vault config                          show resolved config + registered vaults
   vault config use <name>               switch active vault
   vault config add <name> <url> <token> register a vault
@@ -1341,11 +1462,30 @@ func main() {
 
 	case "setup":
 		fs := flag.NewFlagSet("setup", flag.ExitOnError)
-		un := fs.Bool("uninstall", false, "remove the MCP server + sync hooks")
+		un := fs.Bool("uninstall", false, "remove the MCP server + sync hooks + skill")
 		noHook := fs.Bool("no-hook", false, "skip the auto-sync hooks")
 		noMCP := fs.Bool("no-mcp", false, "skip the MCP server")
+		noSkill := fs.Bool("no-skill", false, "skip installing the skill")
+		yes := fs.Bool("yes", false, "non-interactive: apply without the checklist")
+		fs.BoolVar(yes, "y", false, "")
 		parseArgs(fs, rest)
-		cmdSetup(*un, *noHook, *noMCP)
+		cmdSetup(*un, *noHook, *noMCP, *noSkill, *yes)
+
+	case "skill":
+		fs := flag.NewFlagSet("skill", flag.ExitOnError)
+		un := fs.Bool("uninstall", false, "remove the installed skill")
+		parseArgs(fs, rest)
+		if *un {
+			if err := uninstallSkill(); err != nil {
+				die(err)
+			}
+			fmt.Println("✓ removed " + filepath.Dir(skillPath()))
+		} else {
+			if err := installSkill(); err != nil {
+				die(err)
+			}
+			fmt.Println("✓ skill → " + skillPath() + "  (restart Claude Code to load /vault)")
+		}
 
 	case "update":
 		fs := flag.NewFlagSet("update", flag.ExitOnError)

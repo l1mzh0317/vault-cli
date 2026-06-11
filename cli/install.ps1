@@ -33,17 +33,9 @@ Invoke-WebRequest -Uri $url -OutFile $bin -UseBasicParsing
 
 Write-Host "[OK] installed: $bin"
 
-# install the vault skill (markdown only) so Claude knows the CLI exists
+# install the bundled vault skill from the binary (offline, version-matched)
 if ($env:NO_SKILL -ne '1') {
-  $skillDir = Join-Path $env:USERPROFILE '.claude\skills\vault'
-  New-Item -ItemType Directory -Force -Path $skillDir | Out-Null
-  try {
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/main/cli/skill/SKILL.md" `
-      -OutFile (Join-Path $skillDir 'SKILL.md') -UseBasicParsing
-    Write-Host "[OK] skill -> $skillDir\SKILL.md  (restart Claude Code to load /vault)"
-  } catch {
-    Write-Host "  (skill download skipped - binary still works)"
-  }
+  & $bin skill
 }
 
 # PATH hint

@@ -90,13 +90,21 @@ vault build-status <name>             check build progress
 
 # local / meta
 vault sync [--resync] [--meta]        scan transcripts → vault
-vault setup [--uninstall]             wire Claude Code: MCP server + auto-sync hooks
+vault setup [--uninstall] [-y]        wire Claude Code (interactive checklist)
+vault skill [--uninstall]             install the bundled /vault skill
 vault config                          show resolved config + registered vaults
 vault config use <name>               switch active vault
 vault config add <name> <url> <token> register a vault
 vault doctor                          config + reachability check
 vault version
 ```
+
+`vault setup` shows an interactive checklist (MCP server / auto-sync hooks /
+skill) so you choose what to apply — toggle items by number, then confirm.
+Agents and pipes (non-TTY) skip the prompt and apply everything (`-y` forces
+this on a TTY too; `--no-mcp` / `--no-hook` / `--no-skill` preselect). The skill
+is **embedded in the binary**, so `vault setup` / `vault skill` install it
+offline regardless of how you got the binary — `install.sh` is not required.
 
 Notes:
 
