@@ -1074,12 +1074,17 @@ func cmdUpdate(checkOnly bool) {
 	}
 	latest := strings.TrimPrefix(tag, "cli-v")
 	fmt.Printf("current %s · latest %s\n", version, latest)
-	if latest == version {
-		fmt.Println("already up to date ✓")
+	if checkOnly {
+		if latest == version {
+			fmt.Println("already up to date ✓")
+		} else {
+			fmt.Println("update available → run `vault update`")
+		}
 		return
 	}
-	if checkOnly {
-		fmt.Println("update available → run `vault update`")
+	if latest == version {
+		fmt.Println("binary already up to date ✓")
+		refreshSkill() // skill is docs — may have changed independently
 		return
 	}
 	asset := "vault-" + runtime.GOOS + "-" + runtime.GOARCH

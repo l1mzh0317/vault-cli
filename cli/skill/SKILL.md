@@ -40,10 +40,12 @@ vault context-create <name> --member path[:kind[:on|off]] …
 vault build <name>                    # distill a set → structured package
 vault build-status <name>
 
-# local / config
+# local / config / self
 vault sync [--meta]                   # scan ~/.claude transcripts → vault
+vault setup [--uninstall]             # wire Claude Code (MCP server + auto-sync hooks)
 vault config [use <name> | add <name> <url> <token>]
-vault doctor / version
+vault update [--check]                # self-update to the latest release
+vault doctor / version / help
 ```
 
 Run `vault` with no args for the full list. Add `--json` for raw output.
