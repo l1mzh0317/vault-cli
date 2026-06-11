@@ -38,11 +38,16 @@ if ($env:NO_SKILL -ne '1') {
   & $bin skill
 }
 
-# PATH hint
-$paths = $env:PATH -split ';'
-if ($paths -notcontains $dir) {
-  Write-Host "  note: $dir is not on your PATH. Add it, e.g.:"
-  Write-Host "    setx PATH `"`$env:PATH;$dir`""
+# add the install dir to the USER PATH (persistent) and the current session.
+# Use [Environment] on the User scope (not setx — setx truncates PATH at 1024).
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (-not (($userPath -split ';') -contains $dir)) {
+  $newPath = if ($userPath) { "$userPath;$dir" } else { $dir }
+  [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+  Write-Host "[OK] added $dir to your user PATH"
 }
+# make `vault` usable in THIS session immediately
+if (-not (($env:Path -split ';') -contains $dir)) { $env:Path = "$env:Path;$dir" }
 
 & $bin version
+Write-Host "Open a NEW terminal (or run: `$env:Path += ';$dir') so 'vault' is found everywhere."
