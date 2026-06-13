@@ -113,6 +113,45 @@ func TestScrubSecrets(t *testing.T) {
 	}
 }
 
+func TestSyncMarks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sid := "24202849-25ee-4b45-93d7-38a2ceb5c6e0"
+	if sessionMark(sid) != "" {
+		t.Fatal("unmarked session should resolve to empty")
+	}
+	if err := setMark(sid, "off"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionMark(sid); got != "off" {
+		t.Fatalf("mark = %q, want off", got)
+	}
+	if err := setMark(sid, "on"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionMark(sid); got != "on" {
+		t.Fatalf("mark = %q, want on (overwrite)", got)
+	}
+	// sparse: a different, unmarked sid stays empty
+	if sessionMark("deadbeef-0000") != "" {
+		t.Fatal("other sid should be unmarked")
+	}
+}
+
+func TestThreadAndTranscriptSID(t *testing.T) {
+	sid := "24202849-25ee-4b45-93d7-38a2ceb5c6e0"
+	if got := threadOf(sid); got != "24202849" {
+		t.Fatalf("threadOf = %q, want 24202849", got)
+	}
+	if got := transcriptSID("/x/y/" + sid + ".jsonl"); got != sid {
+		t.Fatalf("transcriptSID = %q, want %q", got, sid)
+	}
+	if got := threadOf("short"); got != "short" {
+		t.Fatalf("threadOf(short) = %q", got)
+	}
+}
+
 func TestSessionFrontmatter(t *testing.T) {
 	paths := []string{"sessions/2026-06-11/x-0330-abcd1234", "sessions/2026-06-12/x-0915-abcd1234"}
 	fr := dayFrag{Date: "2026-06-12", HHMM: "0915"}

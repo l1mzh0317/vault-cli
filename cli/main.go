@@ -502,80 +502,268 @@ func saveState(m map[string]stEntry) {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
-// ── local sync ───────────────────────────────────────────────────────────────
-// cmdSync scans local transcripts and ships them to the vault, splitting each
-// conversation into one doc per calendar day under sessions/<date>/. The
-// metaFlag is accepted for backward compat but inert: the old project-keyed
-// sync_session index is retired in favour of frontmatter-linked day fragments.
-func cmdSync(force, metaFlag bool) {
-	_ = metaFlag
+func requireToken() {
 	if token() == "" {
 		die(errors.New("no vault token (set one via vault-manager, env VAULT_TOKEN, or ~/.vault-token)"))
 	}
+}
+
+// ── session identity & sync marks ─────────────────────────────────────────────
+// currentSID is the session running this CLI, exposed by Claude Code as
+// $CLAUDE_CODE_SESSION_ID — lets `mark` / `sync --this` target "this session"
+// without guessing.
+func currentSID() string { return strings.TrimSpace(os.Getenv("CLAUDE_CODE_SESSION_ID")) }
+
+// transcriptSID is the full session id of a transcript (its filename sans .jsonl);
+// threadOf is the short thread id used in doc names (first 8 chars).
+func transcriptSID(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+func threadOf(sid string) string {
+	if len(sid) > 8 {
+		return sid[:8]
+	}
+	return sid
+}
+
+func findTranscript(sid string) string {
+	for _, jl := range iterTranscripts() {
+		if transcriptSID(jl) == sid {
+			return jl
+		}
+	}
+	return ""
+}
+
+// resolveSID turns a mark/rm target into a full session id. Empty → the current
+// session. A full sid → itself. An 8-char thread id (as shown by `vault sessions`)
+// → resolved via a local transcript, else an existing mark file. "" if unresolved.
+func resolveSID(target string) string {
+	if target == "" {
+		return currentSID()
+	}
+	if len(target) > 8 {
+		return target // already a full sid
+	}
+	for _, jl := range iterTranscripts() {
+		if threadOf(transcriptSID(jl)) == target {
+			return transcriptSID(jl)
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(home(), ".vault", "marks")); err == nil {
+		for _, e := range entries {
+			if threadOf(e.Name()) == target {
+				return e.Name()
+			}
+		}
+	}
+	return ""
+}
+
+// A per-session sync mark is a sparse local override: ~/.vault/marks/<sid>
+// holds "on" or "off". Absent file = unmarked → falls through to project /
+// global policy. One file per sid → no read-modify-write races between sessions.
+func markPath(sid string) string { return filepath.Join(home(), ".vault", "marks", sid) }
+
+func sessionMark(sid string) string {
+	b, err := os.ReadFile(markPath(sid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func setMark(sid, val string) error {
+	if err := os.MkdirAll(filepath.Dir(markPath(sid)), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(markPath(sid), []byte(val+"\n"), 0o644)
+}
+
+// ── local sync ───────────────────────────────────────────────────────────────
+// syncTranscript uploads one transcript as per-day fragments under
+// sessions/<date>/. Returns the new fragment paths, how many stale orphans it
+// pruned, and a status in {synced, empty, failed}.
+func syncTranscript(jl string, prev stEntry, hadPrev bool) (paths []string, pruned int, status string) {
+	fi, err := os.Stat(jl)
+	if err != nil || fi.Size() == 0 {
+		return nil, 0, "empty"
+	}
+	thread := sessionID(jl)
+	slug := slugify(readTitle(jl))
+	frags := splitByDay(jl, fi.ModTime().Format("2006-01-02"))
+	if len(frags) == 0 {
+		return nil, 0, "empty"
+	}
+	// Resolve every fragment's path up front — we need them all to write the
+	// prev/next links and part k/n into each fragment's frontmatter.
+	paths = make([]string, len(frags))
+	for i, fr := range frags {
+		name := fr.HHMM + "-" + thread
+		if slug != "" {
+			name = slug + "-" + fr.HHMM + "-" + thread
+		}
+		paths[i] = "sessions/" + fr.Date + "/" + name
+	}
+	for i, fr := range frags {
+		body := sessionFrontmatter(thread, fr, i, len(frags), paths, slug) +
+			scrubSecrets(fr.Body) + "\n"
+		if err := vaultPut(paths[i], body); err != nil {
+			return nil, 0, "failed"
+		}
+	}
+	if hadPrev {
+		pruned = pruneOrphans(prev.Docs, paths)
+	}
+	return paths, pruned, "synced"
+}
+
+// cmdSync scans local transcripts and ships each as per-day fragments. It honors
+// sync marks (a session marked "off" is skipped) — except under --this, which is
+// an explicit request to sync the current session regardless. metaFlag is inert
+// (kept for backward compat).
+func cmdSync(force, metaFlag, thisOnly bool) {
+	_ = metaFlag
+	requireToken()
+
+	var targets []string
+	if thisOnly {
+		sid := currentSID()
+		if sid == "" {
+			die(errors.New("--this needs $CLAUDE_CODE_SESSION_ID (run inside a Claude Code session)"))
+		}
+		jl := findTranscript(sid)
+		if jl == "" {
+			die(fmt.Errorf("no local transcript found for session %s", sid))
+		}
+		targets = []string{jl}
+	} else {
+		targets = iterTranscripts()
+	}
+
 	state := map[string]stEntry{}
 	if !force {
 		state = loadState()
 	}
-	var synced, skipped, empty, failed, pruned int
+	var synced, skipped, empty, failed, pruned, blocked int
 
-	for _, jl := range iterTranscripts() {
+	for _, jl := range targets {
 		fi, err := os.Stat(jl)
 		if err != nil || fi.Size() == 0 {
 			continue
 		}
+		// Every session carries an explicit on/off. First time we see one,
+		// materialize the default ("on") so its disposition is always visible.
+		sid := transcriptSID(jl)
+		mark := sessionMark(sid)
+		if mark == "" {
+			_ = setMark(sid, "on")
+			mark = "on"
+		}
+		// Privacy gate: an "off" mark blocks upload. --this overrides (the user
+		// is explicitly asking to sync this very session) but leaves the mark.
+		if !thisOnly && mark == "off" {
+			blocked++
+			continue
+		}
 		mt := fi.ModTime().Unix()
 		prev, hadPrev := state[jl]
-		if !force && hadPrev && prev.LastModified == mt {
+		if !force && !thisOnly && hadPrev && prev.LastModified == mt {
 			skipped++
 			continue
 		}
-
-		thread := sessionID(jl)
-		slug := slugify(readTitle(jl))
-		frags := splitByDay(jl, fi.ModTime().Format("2006-01-02"))
-		if len(frags) == 0 {
+		ps, pr, status := syncTranscript(jl, prev, hadPrev)
+		switch status {
+		case "synced":
+			pruned += pr
+			state[jl] = stEntry{LastModified: mt, Docs: ps}
+			synced++
+		case "empty":
 			state[jl] = stEntry{LastModified: mt}
 			empty++
-			continue
-		}
-
-		// Resolve every fragment's path up front — we need them all to write
-		// the prev/next links and part k/n into each fragment's frontmatter.
-		paths := make([]string, len(frags))
-		for i, fr := range frags {
-			name := fr.HHMM + "-" + thread
-			if slug != "" {
-				name = slug + "-" + fr.HHMM + "-" + thread
-			}
-			paths[i] = "sessions/" + fr.Date + "/" + name
-		}
-
-		ok := true
-		for i, fr := range frags {
-			body := sessionFrontmatter(thread, fr, i, len(frags), paths, slug) +
-				scrubSecrets(fr.Body) + "\n"
-			if err := vaultPut(paths[i], body); err != nil {
-				ok = false
-				break
-			}
-		}
-		if !ok {
+		default: // failed
 			failed++
-			continue
 		}
-		if hadPrev {
-			pruned += pruneOrphans(prev.Docs, paths)
-		}
-		state[jl] = stEntry{LastModified: mt, Docs: paths}
-		synced++
 	}
 	saveState(state)
 	res := map[string]any{
 		"synced": synced, "skipped": skipped, "empty": empty,
 		"failed": failed, "pruned": pruned,
 	}
+	if blocked > 0 {
+		res["blocked"] = blocked
+	}
 	b, _ := json.Marshal(res)
 	fmt.Println(string(b))
+}
+
+// cmdMark sets this session's sync disposition and reconciles what's already in
+// the vault: "off" retracts uploaded fragments, "on" uploads existing content now.
+func cmdMark(val, target string) {
+	if val != "on" && val != "off" {
+		die(errors.New("usage: vault mark <on|off> [thread]"))
+	}
+	sid := resolveSID(target)
+	if sid == "" {
+		if target == "" {
+			die(errors.New("vault mark needs $CLAUDE_CODE_SESSION_ID (run inside a session), or pass a <thread>"))
+		}
+		die(fmt.Errorf("can't resolve session %q — no local transcript or existing mark", target))
+	}
+	requireToken()
+	if err := setMark(sid, val); err != nil {
+		die(err)
+	}
+	jl := findTranscript(sid)
+
+	if val == "off" {
+		// Retract: delete already-uploaded fragments. Prefer the exact paths
+		// from local state; fall back to scanning the vault by thread id.
+		st := loadState()
+		victims := st[jl].Docs
+		if len(victims) == 0 {
+			thread := threadOf(sid)
+			for _, f := range listSessionFragments("") {
+				if f.Thread == thread {
+					victims = append(victims, f.Path)
+				}
+			}
+		}
+		n := 0
+		for _, p := range victims {
+			if _, err := vaultCallTool("delete_doc", map[string]any{"path": p}); err == nil {
+				n++
+			}
+		}
+		if jl != "" {
+			delete(st, jl)
+			saveState(st)
+		}
+		fmt.Printf("marked off · retracted %d uploaded fragment(s)\n", n)
+		return
+	}
+
+	// val == "on": persist + upload this session's existing content now.
+	if jl == "" {
+		fmt.Printf("marked on · no local transcript yet for %s (will sync once it exists)\n", sid)
+		return
+	}
+	st := loadState()
+	prev, had := st[jl]
+	ps, pruned, status := syncTranscript(jl, prev, had)
+	if status != "synced" {
+		fmt.Printf("marked on · nothing to upload (%s)\n", status)
+		return
+	}
+	if fi, err := os.Stat(jl); err == nil {
+		st[jl] = stEntry{LastModified: fi.ModTime().Unix(), Docs: ps}
+		saveState(st)
+	}
+	msg := fmt.Sprintf("marked on · uploaded %d fragment(s)", len(ps))
+	if pruned > 0 {
+		msg += fmt.Sprintf(" (pruned %d stale)", pruned)
+	}
+	fmt.Println(msg)
 }
 
 // sessionFrontmatter builds the YAML header that ties a conversation's per-day
@@ -626,6 +814,26 @@ func pruneOrphans(old, current []string) int {
 // sessions/<date>/<slug>-<hhmm>-<thread> — no server-side session index needed.
 type sessionFrag struct {
 	Path, Date, HHMM, Thread, Slug string
+	Mark                           string `json:"Mark,omitempty"` // on|off, filled by cmdSessions
+}
+
+// markByThread maps a thread id (8-char) → its sync mark, by scanning the local
+// marks dir. Sessions with no local mark file default to "on".
+func markByThread() map[string]string {
+	m := map[string]string{}
+	entries, err := os.ReadDir(filepath.Join(home(), ".vault", "marks"))
+	if err != nil {
+		return m
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(home(), ".vault", "marks", e.Name())); err == nil {
+			m[threadOf(e.Name())] = strings.TrimSpace(string(b))
+		}
+	}
+	return m
 }
 
 func looksLikeDate(s string) bool {
@@ -724,6 +932,14 @@ func listSessionFragments(since string) []sessionFrag {
 // multi-day conversation shows as one entry spanning its days.
 func cmdSessions(since, thread string, limit int) {
 	frags := listSessionFragments(since)
+	marks := markByThread()
+	for i := range frags {
+		if mk := marks[frags[i].Thread]; mk != "" {
+			frags[i].Mark = mk
+		} else {
+			frags[i].Mark = "on" // no local mark → default
+		}
+	}
 	if thread != "" {
 		kept := frags[:0]
 		for _, f := range frags {
@@ -748,8 +964,8 @@ func cmdSessions(since, thread string, limit int) {
 		byThread[f.Thread] = append(byThread[f.Thread], f)
 	}
 	type conv struct {
-		id, latest, title string
-		frags             []sessionFrag
+		id, latest, title, mark string
+		frags                   []sessionFrag
 	}
 	var convs []conv
 	for _, t := range keysSorted(byThread) {
@@ -762,7 +978,7 @@ func cmdSessions(since, thread string, limit int) {
 				break
 			}
 		}
-		convs = append(convs, conv{id: t, latest: fs[len(fs)-1].Date, title: title, frags: fs})
+		convs = append(convs, conv{id: t, latest: fs[len(fs)-1].Date, title: title, mark: fs[0].Mark, frags: fs})
 	}
 	sort.Slice(convs, func(i, j int) bool {
 		if convs[i].latest != convs[j].latest {
@@ -784,7 +1000,7 @@ func cmdSessions(since, thread string, limit int) {
 		if last := c.frags[len(c.frags)-1].Date; last != span {
 			span += " → " + last
 		}
-		fmt.Printf("\n▸ %s  [%s]  %s\n", title, c.id, span)
+		fmt.Printf("\n▸ %s  [%s]  %-3s  %s\n", title, c.id, c.mark, span)
 		for _, f := range c.frags {
 			fmt.Printf("    %s %s  %s\n", f.Date, f.HHMM, f.Path)
 		}
@@ -1538,6 +1754,8 @@ func usageTo(w io.Writer) {
 sessions  (stored as per-day docs under sessions/<date>/, linked by thread id)
   vault sessions [--since YYYY-MM-DD] [--thread ID] [--limit N]   list conversations
   vault rm-session <thread> [--yes]     delete every day-fragment of a thread
+  vault mark <on|off> [thread]          set a session's sync disposition (default: this one)
+                                        (off retracts uploaded; on uploads now)
 
 docs (read)
   vault ls [folder]                     list docs
@@ -1560,7 +1778,7 @@ context sets
   vault build-status <name>             check build progress
 
 local / meta
-  vault sync [--resync] [--meta]        scan transcripts → vault
+  vault sync [--resync] [--this]        scan transcripts → vault (--this = current session only)
   vault setup [--uninstall] [-y] [--no-hook] [--no-mcp] [--no-skill]   wire Claude Code (interactive)
   vault skill [--uninstall]             install the bundled /vault skill
   vault config                          show resolved config + registered vaults
@@ -1705,9 +1923,19 @@ func main() {
 	case "sync":
 		fs := flag.NewFlagSet("sync", flag.ExitOnError)
 		force := fs.Bool("resync", false, "forget state and re-upload everything")
-		meta := fs.Bool("meta", false, "also register session metadata (list_sessions)")
+		meta := fs.Bool("meta", false, "(inert) kept for backward compat")
+		thisOnly := fs.Bool("this", false, "sync only the current session ($CLAUDE_CODE_SESSION_ID)")
 		parseArgs(fs, rest)
-		cmdSync(*force, *meta)
+		cmdSync(*force, *meta, *thisOnly)
+
+	case "mark":
+		pos := parseArgs(flag.NewFlagSet("mark", flag.ExitOnError), rest)
+		need(pos, 1, "usage: vault mark <on|off> [thread]")
+		target := ""
+		if len(pos) > 1 {
+			target = pos[1]
+		}
+		cmdMark(pos[0], target)
 
 	case "config":
 		if len(rest) == 0 {
