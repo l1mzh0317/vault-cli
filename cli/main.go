@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -209,10 +210,11 @@ func callText(name string, args map[string]any) (string, error) {
 	return toolText(res), nil
 }
 
-// ── transcript parsing (ports python extract_body / pretty_project) ──────────
+// ── transcript parsing ───────────────────────────────────────────────────────
 type tLine struct {
-	Type    string `json:"type"`
-	Message struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	Message   struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
@@ -264,13 +266,74 @@ func scanLines(path string) (*bufio.Scanner, *os.File, error) {
 	return sc, f, nil
 }
 
-func extractBody(path string) string {
+func sessionID(path string) string {
+	sid := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if len(sid) > 8 {
+		sid = sid[:8]
+	}
+	return sid
+}
+
+// titleLine carries the two title sidecar entries Claude Code writes into a
+// transcript: customTitle (user rename) and aiTitle (auto-generated summary).
+type titleLine struct {
+	Type        string `json:"type"`
+	CustomTitle string `json:"customTitle"`
+	AiTitle     string `json:"aiTitle"`
+}
+
+// readTitle returns the human name for a session: the user's manual rename if
+// present, else Claude Code's auto-generated title, else "" (caller falls back
+// to the thread id). Both are sidecar entries; the last one of each type wins.
+func readTitle(path string) string {
 	sc, f, err := scanLines(path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
-	var parts []string
+	var custom, ai string
+	for sc.Scan() {
+		var tl titleLine
+		if json.Unmarshal(sc.Bytes(), &tl) != nil {
+			continue
+		}
+		switch tl.Type {
+		case "custom-title":
+			if tl.CustomTitle != "" {
+				custom = tl.CustomTitle
+			}
+		case "ai-title":
+			if tl.AiTitle != "" {
+				ai = tl.AiTitle
+			}
+		}
+	}
+	if custom != "" {
+		return custom // user rename wins
+	}
+	return ai
+}
+
+// dayFrag is one calendar-day slice of a transcript (local time).
+type dayFrag struct {
+	Date string // YYYY-MM-DD, local
+	HHMM string // start time of this day's first message, local
+	Body string // "## role\ncontent" blocks for this day
+}
+
+// splitByDay partitions a transcript's user/assistant turns into per-local-day
+// fragments. Timestamps are UTC in the file; we convert to local before taking
+// the date, so a 23:30-local message lands on the right day. Lines without a
+// parseable timestamp inherit the previous line's day (else the file's mtime).
+func splitByDay(path string, fallbackDate string) []dayFrag {
+	sc, f, err := scanLines(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	parts := map[string][]string{}
+	firstTS := map[string]time.Time{}
+	lastDate := ""
 	for sc.Scan() {
 		var ln tLine
 		if json.Unmarshal(sc.Bytes(), &ln) != nil {
@@ -284,71 +347,109 @@ func extractBody(path string) string {
 			role = ln.Type
 		}
 		content := contentToString(ln.Message.Content)
-		if strings.TrimSpace(content) != "" {
-			parts = append(parts, "## "+role+"\n"+content)
-		}
-	}
-	return truncRunes(strings.Join(parts, "\n\n"), maxBody)
-}
-
-func firstUserText(path string) string {
-	sc, f, err := scanLines(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	for sc.Scan() {
-		var ln tLine
-		if json.Unmarshal(sc.Bytes(), &ln) != nil {
+		if strings.TrimSpace(content) == "" {
 			continue
 		}
-		if ln.Type != "user" {
-			continue
-		}
-		s := strings.TrimSpace(contentToString(ln.Message.Content))
-		if s != "" && !strings.HasPrefix(s, "<") {
-			if i := strings.IndexByte(s, '\n'); i >= 0 {
-				s = s[:i]
+		var t time.Time
+		haveT := false
+		if ln.Timestamp != "" {
+			if pt, perr := time.Parse(time.RFC3339, ln.Timestamp); perr == nil {
+				t = pt.Local()
+				haveT = true
 			}
-			return truncRunes(s, 60)
+		}
+		date := lastDate
+		if haveT {
+			date = t.Format("2006-01-02")
+		} else if date == "" {
+			date = fallbackDate
+		}
+		parts[date] = append(parts[date], "## "+role+"\n"+content)
+		if haveT {
+			if cur, ok := firstTS[date]; !ok || t.Before(cur) {
+				firstTS[date] = t
+			}
+		}
+		lastDate = date
+	}
+	dates := keysSorted(parts) // lexical sort == chronological for YYYY-MM-DD
+	out := make([]dayFrag, 0, len(dates))
+	for _, d := range dates {
+		hhmm := "0000"
+		if t, ok := firstTS[d]; ok {
+			hhmm = t.Format("1504")
+		}
+		out = append(out, dayFrag{
+			Date: d,
+			HHMM: hhmm,
+			Body: truncRunes(strings.Join(parts[d], "\n\n"), maxBody),
+		})
+	}
+	return out
+}
+
+// slugify turns a title into a path-safe, readable slug. Keeps ASCII
+// alphanumerics and CJK (titles may be Chinese); everything else collapses to
+// a single dash. Empty in → empty out (caller then names by time+id only).
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		case r >= 0x4e00 && r <= 0x9fff: // CJK ideographs
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
 		}
 	}
-	return ""
+	// trim again after truncation: a 40-rune cut can land on a dash boundary.
+	return strings.Trim(truncRunes(strings.Trim(b.String(), "-"), 40), "-")
 }
 
-func prettyProject(raw string) string {
-	proj := raw
-	homeSlug := strings.ReplaceAll(home(), "/", "-")
-	proj = strings.TrimPrefix(proj, homeSlug)
-	proj = strings.TrimLeft(proj, "-")
-	for _, pfx := range []string{"Projects-", "projects-", "Documents-", "code-", "src-"} {
-		if strings.HasPrefix(proj, pfx) {
-			proj = proj[len(pfx):]
-			break
-		}
-	}
-	proj = strings.ReplaceAll(proj, "/", "-")
-	proj = strings.ReplaceAll(proj, " ", "-")
-	proj = strings.Trim(proj, "-")
-	if proj == "" {
-		proj = "misc"
-	}
-	if len(proj) > 48 {
-		proj = proj[:48]
-	}
-	return strings.TrimRight(proj, "-")
-}
+// ── secret scrubbing — redact credentials before any byte leaves the machine ──
+// This is a hard requirement: transcripts routinely contain live tokens/keys,
+// and the server's refine pipeline ships content to an LLM provider, so an
+// un-scrubbed secret would leak twice (at rest + into refined summaries).
+const redacted = "[REDACTED]"
 
-func sessionID(path string) string {
-	sid := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-	if len(sid) > 8 {
-		sid = sid[:8]
+var (
+	// keyedSecretRes: group 1 is a label we keep; the value after it is redacted.
+	keyedSecretRes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)\S+`),
+		regexp.MustCompile(`(?i)((?:api[_-]?key|secret|token|password|passwd|access[_-]?token)\s*[:=]\s*["']?)[^\s"']{6,}`),
 	}
-	return sid
-}
+	// tokenSecretRes: vendor-shaped credentials / high-entropy blobs, redacted whole.
+	tokenSecretRes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{16,}`),
+		regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),        // openai / anthropic
+		regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),           // github PAT (classic)
+		regexp.MustCompile(`gho_[A-Za-z0-9]{36}`),           // github oauth
+		regexp.MustCompile(`github_pat_[A-Za-z0-9_]{50,}`),  // github PAT (fine-grained)
+		regexp.MustCompile(`glpat-[A-Za-z0-9_\-]{20,}`),     // gitlab
+		regexp.MustCompile(`xox[baprs]-[A-Za-z0-9\-]{10,}`), // slack
+		regexp.MustCompile(`AKIA[0-9A-Z]{16}`),              // aws access key id
+		regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`),        // google api key
+		regexp.MustCompile(`\b[0-9a-f]{41,}\b`),             // vault 48-hex token & longer (>40 skips git SHAs)
+		regexp.MustCompile(`-----BEGIN[A-Z ]+PRIVATE KEY-----[\s\S]*?-----END[A-Z ]+PRIVATE KEY-----`),
+	}
+)
 
-func docNameFor(path string) string {
-	return "sessions/" + prettyProject(filepath.Base(filepath.Dir(path))) + "/" + sessionID(path)
+func scrubSecrets(s string) string {
+	for _, re := range keyedSecretRes {
+		s = re.ReplaceAllString(s, "${1}"+redacted)
+	}
+	for _, re := range tokenSecretRes {
+		s = re.ReplaceAllString(s, redacted)
+	}
+	return s
 }
 
 func iterTranscripts() []string {
@@ -377,9 +478,8 @@ func iterTranscripts() []string {
 
 // ── state ────────────────────────────────────────────────────────────────────
 type stEntry struct {
-	LastModified int64  `json:"last_modified"`
-	Doc          string `json:"doc,omitempty"`
-	Bytes        int    `json:"bytes,omitempty"`
+	LastModified int64    `json:"last_modified"`
+	Docs         []string `json:"docs,omitempty"` // per-day fragment paths from the last sync
 }
 
 func statePath() string { return filepath.Join(home(), ".vault-sync-state.json") }
@@ -403,7 +503,12 @@ func saveState(m map[string]stEntry) {
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // ── local sync ───────────────────────────────────────────────────────────────
+// cmdSync scans local transcripts and ships them to the vault, splitting each
+// conversation into one doc per calendar day under sessions/<date>/. The
+// metaFlag is accepted for backward compat but inert: the old project-keyed
+// sync_session index is retired in favour of frontmatter-linked day fragments.
 func cmdSync(force, metaFlag bool) {
+	_ = metaFlag
 	if token() == "" {
 		die(errors.New("no vault token (set one via vault-manager, env VAULT_TOKEN, or ~/.vault-token)"))
 	}
@@ -411,8 +516,7 @@ func cmdSync(force, metaFlag bool) {
 	if !force {
 		state = loadState()
 	}
-	metaOn := metaFlag || fileExists(filepath.Join(home(), ".vault-session-meta-on"))
-	var synced, skipped, empty, failed, metaOK, metaFail int
+	var synced, skipped, empty, failed, pruned int
 
 	for _, jl := range iterTranscripts() {
 		fi, err := os.Stat(jl)
@@ -420,112 +524,294 @@ func cmdSync(force, metaFlag bool) {
 			continue
 		}
 		mt := fi.ModTime().Unix()
-		if prev, ok := state[jl]; !force && ok && prev.LastModified == mt {
+		prev, hadPrev := state[jl]
+		if !force && hadPrev && prev.LastModified == mt {
 			skipped++
 			continue
 		}
-		body := extractBody(jl)
-		if body == "" {
+
+		thread := sessionID(jl)
+		slug := slugify(readTitle(jl))
+		frags := splitByDay(jl, fi.ModTime().Format("2006-01-02"))
+		if len(frags) == 0 {
 			state[jl] = stEntry{LastModified: mt}
 			empty++
 			continue
 		}
-		if err := vaultPut(docNameFor(jl), body); err != nil {
+
+		// Resolve every fragment's path up front — we need them all to write
+		// the prev/next links and part k/n into each fragment's frontmatter.
+		paths := make([]string, len(frags))
+		for i, fr := range frags {
+			name := fr.HHMM + "-" + thread
+			if slug != "" {
+				name = slug + "-" + fr.HHMM + "-" + thread
+			}
+			paths[i] = "sessions/" + fr.Date + "/" + name
+		}
+
+		ok := true
+		for i, fr := range frags {
+			body := sessionFrontmatter(thread, fr, i, len(frags), paths, slug) +
+				scrubSecrets(fr.Body) + "\n"
+			if err := vaultPut(paths[i], body); err != nil {
+				ok = false
+				break
+			}
+		}
+		if !ok {
 			failed++
 			continue
 		}
-		state[jl] = stEntry{LastModified: mt, Doc: docNameFor(jl), Bytes: len(body)}
-		synced++
-		if metaOn {
-			if _, err := vaultCallTool("sync_session", sessionMeta(jl, body)); err == nil {
-				metaOK++
-			} else {
-				metaFail++
-			}
+		if hadPrev {
+			pruned += pruneOrphans(prev.Docs, paths)
 		}
+		state[jl] = stEntry{LastModified: mt, Docs: paths}
+		synced++
 	}
 	saveState(state)
-	res := map[string]any{"synced": synced, "skipped": skipped, "empty": empty, "failed": failed}
-	if metaOn {
-		res["meta_synced"] = metaOK
-		res["meta_failed"] = metaFail
+	res := map[string]any{
+		"synced": synced, "skipped": skipped, "empty": empty,
+		"failed": failed, "pruned": pruned,
 	}
 	b, _ := json.Marshal(res)
 	fmt.Println(string(b))
 }
 
-func sessionMeta(jl, body string) map[string]any {
-	date := time.Now().Format("2006-01-02")
-	if fi, err := os.Stat(jl); err == nil {
-		date = fi.ModTime().Format("2006-01-02")
+// sessionFrontmatter builds the YAML header that ties a conversation's per-day
+// fragments together: a stable thread id, the day, part k/n, the day's start
+// time, and prev/next links to the adjacent fragments.
+func sessionFrontmatter(thread string, fr dayFrag, idx, total int, paths []string, slug string) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("thread: " + thread + "\n")
+	b.WriteString("day: " + fr.Date + "\n")
+	b.WriteString(fmt.Sprintf("part: %d/%d\n", idx+1, total))
+	b.WriteString("start: " + fr.HHMM + "\n")
+	if slug != "" {
+		b.WriteString("title: " + slug + "\n")
 	}
-	return map[string]any{
-		"content": body, "project": prettyProject(filepath.Base(filepath.Dir(jl))),
-		"session_id": sessionID(jl), "date": date,
-		"tags": []string{"auto"}, "label": firstUserText(jl),
+	if idx > 0 {
+		b.WriteString("prev: " + paths[idx-1] + "\n")
 	}
+	if idx < total-1 {
+		b.WriteString("next: " + paths[idx+1] + "\n")
+	}
+	b.WriteString("---\n\n")
+	return b.String()
+}
+
+// pruneOrphans soft-deletes docs written by a previous sync that the current
+// sync no longer produces — i.e. fragments whose path changed because the
+// title resolved (id → topic) or a day re-bucketed. Keeps the vault tidy.
+func pruneOrphans(old, current []string) int {
+	keep := make(map[string]bool, len(current))
+	for _, p := range current {
+		keep[p] = true
+	}
+	n := 0
+	for _, p := range old {
+		if keep[p] {
+			continue
+		}
+		if _, err := vaultCallTool("delete_doc", map[string]any{"path": p}); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // ── sessions ─────────────────────────────────────────────────────────────────
-func cmdSessions(project, tag, since string, limit int) {
-	args := map[string]any{}
-	if project != "" {
-		args["project"] = project
+// sessionFrag is one per-day session doc, reconstructed purely from its path
+// sessions/<date>/<slug>-<hhmm>-<thread> — no server-side session index needed.
+type sessionFrag struct {
+	Path, Date, HHMM, Thread, Slug string
+}
+
+func looksLikeDate(s string) bool {
+	return len(s) == 10 && s[4] == '-' && s[7] == '-' &&
+		isDigits(s[:4], 4) && isDigits(s[5:7], 2) && isDigits(s[8:], 2)
+}
+
+func isDigits(s string, n int) bool {
+	if n >= 0 && len(s) != n {
+		return false
 	}
-	if tag != "" {
-		args["tag"] = tag
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
 	}
-	if since != "" {
-		args["since"] = since
+	return len(s) > 0
+}
+
+func isThreadID(s string) bool {
+	if len(s) < 4 {
+		return false
 	}
-	if limit > 0 {
-		args["limit"] = limit
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
 	}
-	txt, err := callText("list_sessions", args)
+	return true
+}
+
+// parseFragPath splits a session doc path back into its parts. The trailing
+// -<hhmm>-<thread> is stripped only when it actually looks like one, so a slug
+// that happens to contain dashes (or a doc with no slug) still parses sanely.
+func parseFragPath(p string) sessionFrag {
+	f := sessionFrag{Path: p}
+	segs := strings.Split(p, "/")
+	if len(segs) >= 2 {
+		f.Date = segs[len(segs)-2]
+	}
+	name := segs[len(segs)-1]
+	parts := strings.Split(name, "-")
+	if n := len(parts); n >= 2 && isDigits(parts[n-2], 4) && isThreadID(parts[n-1]) {
+		f.Thread = parts[n-1]
+		f.HHMM = parts[n-2]
+		f.Slug = strings.Join(parts[:n-2], "-")
+	} else {
+		f.Slug = name
+	}
+	return f
+}
+
+// listSessionFragments enumerates every session doc by walking the date folders
+// under sessions/ and parsing the paths — the client reconstructs the model
+// from the layout itself, so no server-side session table is required.
+func listSessionFragments(since string) []sessionFrag {
+	foldersTxt, err := callText("list_folders", map[string]any{})
 	if err != nil {
 		die(err)
 	}
+	var folders []string
+	_ = json.Unmarshal([]byte(foldersTxt), &folders)
+	var frags []sessionFrag
+	for _, fld := range folders {
+		date, ok := strings.CutPrefix(fld, "sessions/")
+		if !ok || strings.Contains(date, "/") || !looksLikeDate(date) {
+			continue
+		}
+		if since != "" && date < since {
+			continue
+		}
+		docsTxt, err := callText("list_docs", map[string]any{"folder": fld})
+		if err != nil {
+			continue
+		}
+		var docs []string
+		_ = json.Unmarshal([]byte(docsTxt), &docs)
+		for _, d := range docs {
+			// list_docs returns names relative to the folder; rebuild the
+			// full path so parseFragPath (and delete_doc) see the date too.
+			full := d
+			if !strings.HasPrefix(full, "sessions/") {
+				full = fld + "/" + d
+			}
+			f := parseFragPath(full)
+			if f.Date == "" {
+				f.Date = date
+			}
+			frags = append(frags, f)
+		}
+	}
+	return frags
+}
+
+// cmdSessions lists conversations, grouping a thread's per-day fragments so a
+// multi-day conversation shows as one entry spanning its days.
+func cmdSessions(since, thread string, limit int) {
+	frags := listSessionFragments(since)
+	if thread != "" {
+		kept := frags[:0]
+		for _, f := range frags {
+			if f.Thread == thread {
+				kept = append(kept, f)
+			}
+		}
+		frags = kept
+	}
 	if jsonOut {
-		fmt.Println(txt)
+		b, _ := json.Marshal(frags)
+		fmt.Println(string(b))
 		return
 	}
-	var ss []map[string]any
-	_ = json.Unmarshal([]byte(txt), &ss)
-	if len(ss) == 0 {
+	if len(frags) == 0 {
 		fmt.Println("(no sessions)")
 		return
 	}
-	byProj := map[string][]map[string]any{}
-	for _, s := range ss {
-		byProj[str(s["project"])] = append(byProj[str(s["project"])], s)
+
+	byThread := map[string][]sessionFrag{}
+	for _, f := range frags {
+		byThread[f.Thread] = append(byThread[f.Thread], f)
 	}
-	projs := keysSorted(byProj)
-	fmt.Printf("%d sessions:\n", len(ss))
-	for _, p := range projs {
-		fmt.Printf("\n▸ %s\n", p)
-		for _, s := range byProj[p] {
-			fmt.Printf("    %-11s %-28s [%s]\n", str(s["date"]), str(s["session_id"]), tagsOf(s))
-			if lbl := str(s["label"]); lbl != "" {
-				fmt.Printf("               %s\n", lbl)
+	type conv struct {
+		id, latest, title string
+		frags             []sessionFrag
+	}
+	var convs []conv
+	for _, t := range keysSorted(byThread) {
+		fs := byThread[t]
+		sort.Slice(fs, func(i, j int) bool { return fs[i].Date < fs[j].Date })
+		title := ""
+		for _, f := range fs {
+			if f.Slug != "" {
+				title = f.Slug
+				break
 			}
+		}
+		convs = append(convs, conv{id: t, latest: fs[len(fs)-1].Date, title: title, frags: fs})
+	}
+	sort.Slice(convs, func(i, j int) bool {
+		if convs[i].latest != convs[j].latest {
+			return convs[i].latest > convs[j].latest // most recent first
+		}
+		return convs[i].id < convs[j].id
+	})
+	if limit > 0 && len(convs) > limit {
+		convs = convs[:limit]
+	}
+
+	fmt.Printf("%d conversation(s):\n", len(convs))
+	for _, c := range convs {
+		title := c.title
+		if title == "" {
+			title = "(untitled)"
+		}
+		span := c.frags[0].Date
+		if last := c.frags[len(c.frags)-1].Date; last != span {
+			span += " → " + last
+		}
+		fmt.Printf("\n▸ %s  [%s]  %s\n", title, c.id, span)
+		for _, f := range c.frags {
+			fmt.Printf("    %s %s  %s\n", f.Date, f.HHMM, f.Path)
 		}
 	}
 }
 
-func cmdRebuild(project, id string) {
-	txt, err := callText("rebuild_session", map[string]any{"project": project, "session_id": id})
-	if err != nil {
-		die(err)
+// cmdRmSession deletes every per-day fragment sharing a thread id.
+func cmdRmSession(thread string) {
+	var victims []string
+	for _, f := range listSessionFragments("") {
+		if f.Thread == thread {
+			victims = append(victims, f.Path)
+		}
 	}
-	fmt.Println(txt)
-}
-
-func cmdRmSession(project, id string) {
-	txt, err := callText("delete_session", map[string]any{"project": project, "session_id": id})
-	if err != nil {
-		die(err)
+	if len(victims) == 0 {
+		fmt.Printf("(no session with thread %s)\n", thread)
+		return
 	}
-	fmt.Println(txt)
+	n := 0
+	for _, p := range victims {
+		if _, err := vaultCallTool("delete_doc", map[string]any{"path": p}); err == nil {
+			n++
+		} else {
+			fmt.Fprintln(os.Stderr, "  ✗ "+p)
+		}
+	}
+	fmt.Printf("deleted %d/%d fragment(s) of thread %s\n", n, len(victims), thread)
 }
 
 // ── docs: read ───────────────────────────────────────────────────────────────
@@ -757,17 +1043,6 @@ func numStr(v any) string {
 		return fmt.Sprintf("%d", int(f))
 	}
 	return str(v)
-}
-
-func tagsOf(s map[string]any) string {
-	if arr, ok := s["tags"].([]any); ok {
-		ts := make([]string, 0, len(arr))
-		for _, t := range arr {
-			ts = append(ts, str(t))
-		}
-		return strings.Join(ts, ",")
-	}
-	return ""
 }
 
 func keysSorted[V any](m map[string]V) []string {
@@ -1260,10 +1535,9 @@ func usage() { usageTo(os.Stderr) }
 func usageTo(w io.Writer) {
 	fmt.Fprintln(w, `vault — context store CLI   (global: --json for raw output)
 
-sessions
-  vault sessions [--project P] [--tag T] [--since YYYY-MM-DD] [--limit N]
-  vault rebuild <project> <id>          re-summarize a session's refined face
-  vault rm-session <project> <id> [--yes]   delete a session
+sessions  (stored as per-day docs under sessions/<date>/, linked by thread id)
+  vault sessions [--since YYYY-MM-DD] [--thread ID] [--limit N]   list conversations
+  vault rm-session <thread> [--yes]     delete every day-fragment of a thread
 
 docs (read)
   vault ls [folder]                     list docs
@@ -1319,26 +1593,20 @@ func main() {
 
 	case "sessions":
 		fs := flag.NewFlagSet("sessions", flag.ExitOnError)
-		project := fs.String("project", "", "filter by project")
-		tag := fs.String("tag", "", "filter by tag")
-		since := fs.String("since", "", "only since YYYY-MM-DD")
-		limit := fs.Int("limit", 0, "max results")
+		since := fs.String("since", "", "only days on/after YYYY-MM-DD")
+		thread := fs.String("thread", "", "only this thread id")
+		limit := fs.Int("limit", 0, "max conversations")
 		parseArgs(fs, rest)
-		cmdSessions(*project, *tag, *since, *limit)
-
-	case "rebuild":
-		pos := parseArgs(flag.NewFlagSet("rebuild", flag.ExitOnError), rest)
-		need(pos, 2, "usage: vault rebuild <project> <id>")
-		cmdRebuild(pos[0], pos[1])
+		cmdSessions(*since, *thread, *limit)
 
 	case "rm-session":
 		fs := flag.NewFlagSet("rm-session", flag.ExitOnError)
 		yes := fs.Bool("yes", false, "skip confirmation")
 		fs.BoolVar(yes, "y", false, "skip confirmation")
 		pos := parseArgs(fs, rest)
-		need(pos, 2, "usage: vault rm-session <project> <id> [--yes]")
-		confirmOrDie(*yes, fmt.Sprintf("delete session %s/%s", pos[0], pos[1]))
-		cmdRmSession(pos[0], pos[1])
+		need(pos, 1, "usage: vault rm-session <thread> [--yes]")
+		confirmOrDie(*yes, fmt.Sprintf("delete all fragments of thread %s", pos[0]))
+		cmdRmSession(pos[0])
 
 	case "ls":
 		pos := parseArgs(flag.NewFlagSet("ls", flag.ExitOnError), rest)
